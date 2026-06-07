@@ -49,6 +49,20 @@ target_link_libraries(wordle PRIVATE wordle_core)
 add_executable(build_db tools/build_db.cpp)
 target_link_libraries(build_db PRIVATE wordle_core)
 
+# ── Tests ─────────────────────────────────────────────────────────────────────
+enable_testing()
+find_package(Catch2 3 REQUIRED)
+
+add_executable(wordle_tests
+  tests/test_pattern.cpp
+  tests/test_wordlist.cpp
+  tests/test_solver.cpp
+  tests/test_database.cpp
+)
+target_link_libraries(wordle_tests PRIVATE wordle_core Catch2::Catch2WithMain)
+# Run tests from build dir so data/ files are accessible at data/words.txt etc.
+add_test(NAME wordle_tests COMMAND wordle_tests WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
 # ── Install data alongside binaries ──────────────────────────────────────────
 configure_file(
   ${CMAKE_SOURCE_DIR}/data/words.txt

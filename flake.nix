@@ -28,6 +28,7 @@
             sqlite
             pkg-config
             hyperfine
+            catch2_3
           ];
 
           shellHook = ''
