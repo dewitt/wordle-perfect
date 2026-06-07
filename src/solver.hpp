@@ -90,6 +90,26 @@ public:
         std::span<const uint16_t> candidates,
         bool                      restrict_to_candidates = false) const;
 
+    // Minimax best guess: finds the guess that minimises worst-case depth
+    // (number of additional guesses needed, including this one) over
+    // `candidates`. Uses alpha-beta pruning seeded by the entropy guess.
+    //
+    // `depth_budget` is the maximum additional guesses allowed (including
+    // the current one). Returns {NPOS, INT_MAX} if no solution exists
+    // within budget.
+    //
+    // Intended for small candidate sets (≤ MINIMAX_THRESHOLD) where the
+    // O(N·K^depth) cost is acceptable. For larger sets, fall back to
+    // best_guess().
+    // Minimax is applied to candidate sets up to this size. Below the
+    // threshold, the solver searches for the guess that minimises worst-case
+    // depth rather than just maximising entropy.  Sub-calls restrict the
+    // guess pool to candidates only (O(K^depth) instead of O(N^depth)).
+    static constexpr std::size_t MINIMAX_THRESHOLD = 15;
+    [[nodiscard]] std::pair<uint16_t, int>
+    minimax_best_guess(std::span<const uint16_t> candidates,
+                       int depth_budget) const;
+
     // Solve for a known target word, returning the full step sequence.
     // answer_idx must be a valid index into the WordList.
     [[nodiscard]] SolveResult solve(uint16_t answer_idx) const;
@@ -100,6 +120,24 @@ private:
         std::span<const uint16_t> candidates,
         uint16_t                  guess_idx,
         const PatternMatrix&      pm) const noexcept;
+
+    // Recursive minimax core; upper_bound is the best worst-depth seen so
+    // far (alpha-beta: skip guesses that exceed it).
+    //
+    // restrict_to_candidates: when true, only search candidate words (not the
+    // full 14k vocabulary). Used for sub-calls to keep cost O(K^depth) where
+    // K = candidate count. The top-level call always searches all words.
+    [[nodiscard]] std::pair<uint16_t, int>
+    minimax_inner(std::span<const uint16_t> candidates,
+                  int depth_budget,
+                  int upper_bound,
+                  bool restrict_to_candidates = false) const;
+
+    // Fast greedy worst-depth: follows entropy-greedy choices (no branching
+    // over alternative guesses). Used to seed alpha-beta upper bound so that
+    // minimax_inner prunes aggressively from the start.
+    [[nodiscard]] int greedy_worst_depth(std::span<const uint16_t> candidates,
+                                         int depth_budget) const noexcept;
 
     const WordList&      words_;
     const PatternMatrix& patterns_;

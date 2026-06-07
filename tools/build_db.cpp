@@ -47,14 +47,17 @@ struct TreeBuilder {
     EntropySolver          solver;
     unsigned               nthreads;
     EntropySolver::WeightFn weight_fn;  // may be null (uniform)
+    uint16_t                fixed_root{WordList::NPOS};  // forced first guess, or NPOS
 
     uint32_t next_id{0};
     uint64_t nodes_written{0};
     int      max_depth_seen{0};
+    uint64_t minimax_calls{0};
 
     TreeBuilder(const WordList& w, const PatternMatrix& p, Database& d, unsigned t,
-                EntropySolver::WeightFn wf = {})
-        : words{w}, pm{p}, db{d}, solver{w, p, wf}, nthreads{t}, weight_fn{wf} {}
+                EntropySolver::WeightFn wf = {}, uint16_t fixed_root = WordList::NPOS)
+        : words{w}, pm{p}, db{d}, solver{w, p, wf}, nthreads{t}, weight_fn{wf},
+          fixed_root{fixed_root} {}
 
     // Entry point: build the entire tree wrapped in a single transaction.
     uint32_t build() {
@@ -73,10 +76,34 @@ private:
     uint32_t build_node(std::vector<uint16_t>& candidates, int depth) {
         uint32_t my_id = next_id++;
 
-        // Choose best guess for this candidate set
-        uint16_t guess_idx = (depth == 1)
-            ? best_guess_parallel(candidates)   // parallelise the expensive root
-            : solver.best_guess(candidates);
+        // Choose best guess for this candidate set.
+        // At small candidate sets, switch to minimax to minimise worst-case
+        // depth rather than just maximising entropy. This eliminates the
+        // depth-6 paths that greedy entropy leaves behind for repeated-letter
+        // trap families (cover, rover, roger, etc.).
+        uint16_t guess_idx;
+        if (depth == 1 && fixed_root != WordList::NPOS) {
+            guess_idx = fixed_root;   // forced start word
+        } else if (depth == 1) {
+            guess_idx = best_guess_parallel(candidates);  // parallelise expensive root
+        } else if (candidates.size() <= EntropySolver::MINIMAX_THRESHOLD) {
+            // Budget: worst-case Wordle is solvable in 6; remaining budget is
+            // 6 - (depth - 1) guesses from this node onward.
+            // Clamp to 1 so we never pass ≤0 to minimax.
+            const int budget = std::max(1, 7 - depth);
+            ++minimax_calls;
+            auto mm_t0 = Clock::now();
+            auto [gi, worst_depth] = solver.minimax_best_guess(candidates, budget);
+            double mm_e = elapsed_s(mm_t0);
+            if (mm_e > 0.01 || minimax_calls <= 5) {
+                std::println(stderr, "[mm #{} d={} c={} b={} t={:.3f}s]",
+                    minimax_calls, depth, candidates.size(), budget, mm_e);
+            }
+            (void)worst_depth;
+            guess_idx = (gi != WordList::NPOS) ? gi : solver.best_guess(candidates);
+        } else {
+            guess_idx = solver.best_guess(candidates);
+        }
 
         // Insert node
         auto r = db.insert_node(my_id, guess_idx, static_cast<uint8_t>(depth));
@@ -263,13 +290,17 @@ int main(int argc, char** argv) {
         return {};
     };
 
-    std::string strategy = "answer-weighted-v1";  // default
+    std::string strategy    = "answer-weighted-v1";  // default
+    std::string start_word;                           // empty = let solver choose
+    double      answer_weight = 1000.0;               // multiplier for answer words
 
-    if (auto v = consume("--words");    !v.empty()) words_path = v;
-    if (auto v = consume("--answers");  !v.empty()) answers_path = v;
-    if (auto v = consume("--output");   !v.empty()) out_path = v;
-    if (auto v = consume("--strategy"); !v.empty()) strategy = v;
-    if (auto v = consume("--jobs");     !v.empty()) nthreads = static_cast<unsigned>(std::stoi(std::string(v)));
+    if (auto v = consume("--words");         !v.empty()) words_path    = v;
+    if (auto v = consume("--answers");       !v.empty()) answers_path  = v;
+    if (auto v = consume("--output");        !v.empty()) out_path      = v;
+    if (auto v = consume("--strategy");      !v.empty()) strategy      = v;
+    if (auto v = consume("--start-word");    !v.empty()) start_word    = v;
+    if (auto v = consume("--answer-weight"); !v.empty()) answer_weight = std::stod(std::string(v));
+    if (auto v = consume("--jobs");          !v.empty()) nthreads      = static_cast<unsigned>(std::stoi(std::string(v)));
 
     // ── Word lists ────────────────────────────────────────────────────────
     std::print("loading words from {}... ", words_path);
@@ -315,17 +346,26 @@ int main(int argc, char** argv) {
     if (strategy == "entropy-greedy-v1") {
         weight_fn = {};  // uniform
     } else {
-        // answer-weighted: curated answer words count 1000x more than others
-        weight_fn = [&answer_indices](uint16_t idx) -> double {
-            return std::ranges::binary_search(answer_indices, idx) ? 1000.0 : 1.0;
+        // answer-weighted: curated answer words count answer_weight× more than others
+        weight_fn = [&answer_indices, answer_weight](uint16_t idx) -> double {
+            return std::ranges::binary_search(answer_indices, idx) ? answer_weight : 1.0;
         };
+    }
+
+    // ── Fixed start word (optional) ───────────────────────────────────────
+    uint16_t fixed_root = WordList::NPOS;
+    if (!start_word.empty()) {
+        fixed_root = wl->index_of(start_word);
+        if (fixed_root == WordList::NPOS)
+            die(std::format("--start-word '{}' not found in word list", start_word));
+        std::println("using forced start word: {}", start_word);
     }
 
     // ── Tree building ─────────────────────────────────────────────────────
     std::println("building decision tree (strategy={}, {} threads)...", strategy, nthreads);
     t0 = Clock::now();
 
-    TreeBuilder builder{*wl, pm, *db, nthreads, weight_fn};
+    TreeBuilder builder{*wl, pm, *db, nthreads, weight_fn, fixed_root};
     builder.build();
 
     std::println("tree built in {:.1f}s  ({} nodes, max depth {})",
