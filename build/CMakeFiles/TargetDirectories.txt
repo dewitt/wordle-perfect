@@ -1,0 +1,5 @@
+/Users/dewitt/git/wordle-perfect/build/CMakeFiles/wordle_core.dir
+/Users/dewitt/git/wordle-perfect/build/CMakeFiles/wordle.dir
+/Users/dewitt/git/wordle-perfect/build/CMakeFiles/build_db.dir
+/Users/dewitt/git/wordle-perfect/build/CMakeFiles/edit_cache.dir
+/Users/dewitt/git/wordle-perfect/build/CMakeFiles/rebuild_cache.dir

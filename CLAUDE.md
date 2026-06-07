@@ -22,11 +22,19 @@ A Wordle solver that precomputes the best-known decision tree over all valid Wor
 ## Current state
 
 - [x] Behavioral spec written (`spec.md`, dx format)
-- [ ] Word list acquisition
-- [ ] Dynamic solver (entropy minimization or similar — intermediate artifact, needed for precomputation)
-- [ ] Precomputation pipeline (builds the decision tree and database)
-- [ ] CLI tool (solution, solver, batch modes)
-- [ ] Database tooling (metadata sub-command, dump sub-command if binary)
+- [x] Word list acquisition (`data/words.txt` 14,855 words; `data/answers.txt` 2,315 words)
+- [x] Pattern matrix precomputation (220M entries, ~210 MB, built in 0.5s on M2)
+- [x] Dynamic solver — entropy-greedy (`EntropySolver`, `solver.cpp`)
+- [x] Precomputation pipeline — `build_db` tool; builds SQLite decision tree
+- [x] CLI tool — `wordle` binary; `solve`, `play`, `eval`, `info`, `dump` modes
+- [x] Database integrity — FNV-1a checksum on every open
+
+**Latest database results (entropy-greedy-v1, start word: tares):**
+- Worst case: 6 guesses (all 2,315 answers solved)
+- Mean depth: 4.0199 guesses
+- Distribution: 0×1, 9×2, 434×3, 1401×4, 444×5, 27×6
+
+**Next: hillclimbing** — 27 words still need 6 guesses; try answer-weighted entropy, minimax, alternative start words.
 
 ## Spec format
 
