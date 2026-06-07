@@ -239,8 +239,8 @@ evaluate(const Database& db, const WordList& words, const WordList& answers) {
         int      depth = 0;
         bool     solved = false;
 
-        // Follow the tree until GGGGG or a missing edge (cap at 6 — the game limit)
-        for (int round = 1; round <= 6; ++round) {
+        // Follow the tree until GGGGG or a missing edge (cap at dist array size)
+        for (int round = 1; round < static_cast<int>(res.dist.size()); ++round) {
             auto info = db.node_info(node);
             if (!info) break;
             auto [word_idx, d] = *info;
@@ -290,16 +290,31 @@ int main(int argc, char** argv) {
         return {};
     };
 
-    std::string strategy    = "answer-weighted-v2";  // default
+    // --full: build a tree that covers every word in the guess list as a
+    // potential answer.  Overrides --answers default and switches strategy to
+    // full-coverage-v1.  Explicit --answers or --strategy flags still win.
+    bool full_mode = [&args]() {
+        auto it = std::ranges::find(args, std::string_view{"--full"});
+        if (it == args.end()) return false;
+        args.erase(it);
+        return true;
+    }();
+
+    std::string strategy    = full_mode ? "full-coverage-v1" : "answer-weighted-v2";
     std::string start_word;                           // empty = let solver choose
     double      answer_weight = 1000.0;               // multiplier for answer words
+    std::optional<std::string> answers_explicit;      // set if --answers was given
 
-    if (auto v = consume("--words");         !v.empty()) words_path    = v;
-    if (auto v = consume("--answers");       !v.empty()) answers_path  = v;
-    if (auto v = consume("--output");        !v.empty()) out_path      = v;
-    if (auto v = consume("--strategy");      !v.empty()) strategy      = v;
-    if (auto v = consume("--start-word");    !v.empty()) start_word    = v;
+    if (auto v = consume("--words");         !v.empty()) words_path           = v;
+    if (auto v = consume("--answers");       !v.empty()) answers_explicit     = std::string(v);
+    if (auto v = consume("--output");        !v.empty()) out_path             = v;
+    if (auto v = consume("--strategy");      !v.empty()) strategy             = v;
+    if (auto v = consume("--start-word");    !v.empty()) start_word           = v;
     if (auto v = consume("--answer-weight"); !v.empty()) answer_weight = std::stod(std::string(v));
+
+    // Apply --full defaults: answers = all words, unless --answers was explicit
+    if (full_mode) answers_path = answers_explicit.value_or(words_path);
+    else if (answers_explicit)  answers_path = *answers_explicit;
     if (auto v = consume("--jobs");          !v.empty()) {
         nthreads = static_cast<unsigned>(std::stoi(std::string(v)));
         if (nthreads == 0) nthreads = std::max(1u, std::thread::hardware_concurrency());
@@ -382,10 +397,13 @@ int main(int argc, char** argv) {
         ev.worst, ev.mean, ev.solved, ev.failures);
 
     // ── Finalize ──────────────────────────────────────────────────────────
+    const bool is_full_coverage = (ans->size() == wl->size());
     DbMetadata meta{
         .words_source    = "https://gist.github.com/SukkaW/92ff13af03a0117e5bafec6c7f7d6dce",
         .words_date      = "2026-06-07",
-        .answers_source  = "cfreshman/a03ef2cba789d8cf00c08f767e0fad7b (original embed) + eithan/wordlelist (40 post-acquisition NYT additions)",
+        .answers_source  = is_full_coverage
+                         ? "all valid guess words (same as words source)"
+                         : "cfreshman/a03ef2cba789d8cf00c08f767e0fad7b (original embed) + eithan/wordlelist (40 post-acquisition NYT additions)",
         .strategy        = strategy,
         .start_word      = {},
         .worst_case_depth = ev.worst,

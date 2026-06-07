@@ -58,24 +58,28 @@ static void mode_dump(const Database& db, const WordList& words) {
 // Mode: solve — show precomputed path for a known target word
 // ---------------------------------------------------------------------------
 static void mode_solve(const Database& db, const WordList& words,
-                       const WordList& answers, std::string_view target) {
-    // Validate against the answers list first: the DB only has paths for
-    // answer words. A valid guess that isn't an answer will fail mid-traversal
-    // with a confusing "missing edge" error otherwise.
-    if (!answers.contains(target)) {
-        if (words.contains(target)) {
-            std::println(stderr,
-                "error: '{}' is a valid guess but not an answer word; "
-                "solve paths only exist for the {} answer words",
-                target, answers.size());
-        } else {
+                       const WordList& answers, std::string_view target,
+                       int max_rounds, bool full_coverage, double mean_depth) {
+    // In full-coverage mode, any word in the guess list is a valid target.
+    // In answers-only mode, only curated answer words have precomputed paths.
+    if (full_coverage) {
+        if (!words.contains(target)) {
             std::println(stderr, "error: '{}' is not in the word list", target);
+            std::exit(1);
         }
-        std::exit(1);
+    } else {
+        if (!answers.contains(target)) {
+            if (words.contains(target)) {
+                std::println(stderr,
+                    "error: '{}' is a valid guess but not an answer word; "
+                    "solve paths only exist for the {} answer words",
+                    target, answers.size());
+            } else {
+                std::println(stderr, "error: '{}' is not in the word list", target);
+            }
+            std::exit(1);
+        }
     }
-
-    auto meta = db.read_metadata();
-    const double mean = meta ? meta->mean_depth : 0.0;
 
     uint32_t node = Database::ROOT_ID;
     int step = 0;
@@ -92,8 +96,8 @@ static void mode_solve(const Database& db, const WordList& words,
         print_step(step, guess, p);
 
         if (p == PATTERN_SOLVED) break;
-        if (step >= 6) {
-            std::println(stderr, "  (failed to solve within 6 guesses)");
+        if (step >= max_rounds) {
+            std::println(stderr, "  (failed to solve within {} guesses)", max_rounds);
             std::exit(1);
         }
 
@@ -103,13 +107,13 @@ static void mode_solve(const Database& db, const WordList& words,
     }
 
     std::println("solved in {} guess{}  (db mean: {:.4f})", step,
-        step == 1 ? "" : "es", mean);
+        step == 1 ? "" : "es", mean_depth);
 }
 
 // ---------------------------------------------------------------------------
 // Mode: play — interactive solver (tool guesses, user responds)
 // ---------------------------------------------------------------------------
-static void mode_play(const Database& db, const WordList& words) {
+static void mode_play(const Database& db, const WordList& words, int max_rounds) {
     auto root_word_res = db.root_word();
     if (!root_word_res) die(root_word_res.error());
 
@@ -125,7 +129,7 @@ static void mode_play(const Database& db, const WordList& words) {
     std::println("  B = letter not in answer");
     std::println("");
 
-    for (int round = 1; round <= 6; ++round) {
+    for (int round = 1; round <= max_rounds; ++round) {
         auto info = db.node_info(node);
         if (!info) die(info.error());
         auto [word_idx, depth] = *info;
@@ -197,8 +201,8 @@ static void mode_play(const Database& db, const WordList& words) {
             return;
         }
 
-        if (round == 6) {
-            std::println(stderr, "\nfailed to solve within 6 guesses");
+        if (round == max_rounds) {
+            std::println(stderr, "\nfailed to solve within {} guesses", max_rounds);
             std::exit(1);
         }
 
@@ -212,7 +216,7 @@ static void mode_play(const Database& db, const WordList& words) {
 // Mode: eval — batch evaluation
 // ---------------------------------------------------------------------------
 static void mode_eval(const Database& db, const WordList& words,
-                      std::string_view eval_file) {
+                      std::string_view eval_file, int max_rounds) {
     // Load evaluation word list
     auto eval_wl = WordList::load(eval_file);
     if (!eval_wl) die(eval_wl.error());
@@ -233,7 +237,7 @@ static void mode_eval(const Database& db, const WordList& words,
         int depth = 0;
         bool solved = false;
 
-        for (int round = 1; round <= 6 && !solved; ++round) {
+        for (int round = 1; round <= max_rounds && !solved; ++round) {
             auto info = db.node_info(node);
             if (!info) { std::println(stderr, "db error: {}", info.error()); break; }
             auto [word_idx, d] = *info;
@@ -262,11 +266,11 @@ static void mode_eval(const Database& db, const WordList& words,
 
     double sum = 0.0;
     int worst = 0;
-    std::array<int, 7> dist{};  // dist[1..6]
+    std::vector<int> dist(max_rounds + 1, 0);  // dist[1..max_rounds]
     for (int d : depths) {
         sum += d;
         worst = std::max(worst, d);
-        if (d >= 1 && d <= 6) dist[d]++;
+        if (d >= 1 && d <= max_rounds) dist[d]++;
     }
     double mean = sum / static_cast<double>(depths.size());
 
@@ -278,8 +282,9 @@ static void mode_eval(const Database& db, const WordList& words,
     std::println("  worst case      : {} guesses", worst);
     std::println("  mean depth      : {:.4f} guesses", mean);
     std::println("  distribution    :");
-    for (int i = 1; i <= 6; ++i) {
-        std::println("    {} guesses: {:5d}", i, dist[i]);
+    for (int i = 1; i <= max_rounds; ++i) {
+        if (dist[i] > 0)
+            std::println("    {} guesses: {:5d}", i, dist[i]);
     }
 }
 
@@ -343,18 +348,28 @@ int main(int argc, char** argv) {
             return 1;
         }
 
+        // Read metadata once; derive runtime parameters from it
+        auto meta      = db.read_metadata();
+        const int  max_rounds     = (meta && meta->worst_case_depth > 0)
+                                  ? meta->worst_case_depth : 6;
+        const bool full_coverage  = meta && (meta->total_answers == meta->total_words);
+        const double mean_depth   = meta ? meta->mean_depth : 0.0;
+
         if (cmd == "info") {
             mode_info(db);
         } else if (cmd == "dump") {
             mode_dump(db, words);
         } else if (cmd == "solve") {
             if (args.size() < 2) die("solve requires a target word");
-            mode_solve(db, words, answers, args[1]);
+            mode_solve(db, words, answers, args[1], max_rounds, full_coverage, mean_depth);
         } else if (cmd == "play") {
-            mode_play(db, words);
+            mode_play(db, words, max_rounds);
         } else if (cmd == "eval") {
-            std::string eval_path = args.size() >= 2 ? std::string(args[1]) : "data/answers.txt";
-            mode_eval(db, words, eval_path);
+            // Default eval target: all words for full-coverage DB, answers otherwise
+            std::string eval_path = args.size() >= 2
+                ? std::string(args[1])
+                : (full_coverage ? words_path : answers_path);
+            mode_eval(db, words, eval_path, max_rounds);
         } else {
             std::println(stderr, "unknown command: {}", cmd);
             return 1;
