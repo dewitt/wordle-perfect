@@ -50,6 +50,15 @@ A Wordle solver that precomputes the best-known decision tree over all valid Wor
 6. Hillclimb: try alternative start words, pruning strategies, or algorithms to improve worst-case then mean depth.
 7. Build the CLI on top of the final database.
 
+## Available agents and tools
+
+The lead agent (Claude Code) is encouraged to delegate to sub-agents for code review, design review, parallel implementation work, and other tasks where a second opinion or parallel execution helps. Two additional agents are available in this environment:
+
+- **antigravity** (`/Users/dewitt/.local/bin/agy --dangerously-skip-permissions`) — invoke from this directory for code/design review, parallel research, etc.
+- **codex** (`codex --yolo`) — available via PATH at `/opt/homebrew/bin/codex`
+
+Monitor token usage and quota when running multiple agents in parallel. GitHub issues and PRs may be used for coordination and review, but keep the repository **private** at all times.
+
 ## Environment
 
 This project uses **Nix flakes** for hermetic, reproducible builds. The `flake.nix` declares all toolchains and dependencies. **direnv** (`.envrc`) activates the environment automatically on `cd`. Never install tools globally for this project — everything goes in the flake.
