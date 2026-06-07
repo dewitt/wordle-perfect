@@ -290,7 +290,7 @@ int main(int argc, char** argv) {
         return {};
     };
 
-    std::string strategy    = "answer-weighted-v1";  // default
+    std::string strategy    = "answer-weighted-v2";  // default
     std::string start_word;                           // empty = let solver choose
     double      answer_weight = 1000.0;               // multiplier for answer words
 
@@ -385,7 +385,7 @@ int main(int argc, char** argv) {
     DbMetadata meta{
         .words_source    = "https://gist.github.com/SukkaW/92ff13af03a0117e5bafec6c7f7d6dce",
         .words_date      = "2026-06-07",
-        .answers_source  = "https://gist.github.com/cfreshman/a03ef2cba789d8cf00c08f767e0fad7b",
+        .answers_source  = "cfreshman/a03ef2cba789d8cf00c08f767e0fad7b (original embed) + eithan/wordlelist (40 post-acquisition NYT additions)",
         .strategy        = strategy,
         .start_word      = {},
         .worst_case_depth = ev.worst,

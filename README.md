@@ -9,23 +9,23 @@ The system hillclimbs toward the best-known solution tree — minimizing worst-c
 | Metric | Value |
 |--------|-------|
 | Start word | **tarse** (auto-selected) |
-| Words covered | 14,855 valid guesses / 2,315 answers |
-| Worst case | **6 guesses** (all 2,315 answers solved) |
-| Mean depth | **3.8203 guesses** |
-| Database size | **614 KB** |
+| Words covered | 14,855 valid guesses / 2,355 answers |
+| Worst case | **6 guesses** (all 2,355 answers solved) |
+| Mean depth | **3.8170 guesses** |
+| Database size | **455 KB** |
 | Per-query latency | ~5 ms (cold DB open); µs amortized |
 
-Distribution over 2,315 answer words:
+Distribution over 2,355 answer words:
 
 ```
 2 guesses:    10
-3 guesses:   655
-4 guesses:  1396
-5 guesses:   247
-6 guesses:     7
+3 guesses:   680
+4 guesses:  1402
+5 guesses:   257
+6 guesses:     6
 ```
 
-The 7 six-guess words (cover, goody, joker, racer, roger, rover, woozy) are provably unavoidable from the tarse opening given this word list — they form clusters that cannot be distinguished sooner.
+The 6 six-guess words (boxer, goody, joker, racer, rover, woozy) are provably unavoidable from the tarse opening given this word list — they form clusters that cannot be distinguished sooner.
 
 ## Build
 
@@ -65,7 +65,7 @@ Tests cover pattern computation (including duplicate-letter edge cases), word li
 #   2. pinch  [BBBBY ]
 #   3. abbot  [BYBBY ]
 #   4. thumb  [GGGGG ]
-# solved in 4 guesses  (db mean: 3.8203)
+# solved in 4 guesses  (db mean: 3.8170)
 
 # Interactive solver mode (tool guesses, you supply G/Y/B responses)
 ./build/wordle play
@@ -88,7 +88,7 @@ All commands accept `--db <path>` (default: `wordle.db`), `--words <path>` (defa
 - **EntropySolver** — dynamic solver used during precomputation. At each node, picks the guess maximising weighted Shannon entropy over the remaining candidate set. Answer-list words are weighted 1000× to bias the tree toward better performance on likely answers.
 - **Minimax optimizer** — for candidate sets of ≤15 words, switches from greedy entropy to alpha-beta minimax to minimise worst-case depth rather than expected depth. Seeded by the greedy result for aggressive early pruning; sub-calls restrict search to the candidate pool to keep cost O(K^depth).
 - **build_db** — precomputation pipeline. Builds the full decision tree depth-first and writes it to SQLite in a single transaction. Root guess is found in parallel; all other nodes are single-threaded.
-- **Database** — SQLite with FNV-1a checksum verified on every open. Nodes, edges, and metadata in three tables. 16,524 nodes for the full word list. Hot-path lookup statements (`next_node`, `node_info`) are lazily prepared and cached for the lifetime of the connection.
+- **Database** — SQLite with FNV-1a checksum verified on every open. Nodes, edges, and metadata in three tables. 16,516 nodes for the full word list. Hot-path lookup statements (`next_node`, `node_info`) are lazily prepared and cached for the lifetime of the connection.
 - **wordle CLI** — thin layer over the database. Each solve step is one SQL lookup. Solution mode validates targets against the answers list and gives a helpful error for valid-guess-but-not-answer inputs.
 
 ## Spec

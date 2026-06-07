@@ -22,7 +22,7 @@ A Wordle solver that precomputes the best-known decision tree over all valid Wor
 ## Current state
 
 - [x] Behavioral spec written (`spec.md`, dx format)
-- [x] Word list acquisition (`data/words.txt` 14,855 words; `data/answers.txt` 2,315 words)
+- [x] Word list acquisition (`data/words.txt` 14,855 words; `data/answers.txt` 2,355 words)
 - [x] Pattern matrix precomputation (220M entries, ~210 MB, built in 0.5s on M2)
 - [x] Dynamic solver — answer-weighted entropy-greedy (`EntropySolver`, `solver.cpp`)
 - [x] Minimax optimizer — alpha-beta for candidate sets ≤15; seeded by greedy for pruning
@@ -33,23 +33,25 @@ A Wordle solver that precomputes the best-known decision tree over all valid Wor
 - [x] Test suite — Catch2 v3, 43 tests, `ctest` in ~3s (pattern, wordlist, solver, database)
 - [x] Code quality — `DEPTH_IMPOSSIBLE` constant, cached DB statements, uint16_t overflow guard, mode_solve answers validation, FNV hash correctness
 
-**Latest database results (answer-weighted-v1, start word: tarse):**
-- Worst case: 6 guesses (all 2,315 answers solved)
-- Mean depth: 3.8203 guesses (stored: 3.820302)
-- Distribution: 0×1, 10×2, 655×3, 1396×4, 247×5, 7×6
-- Database: 16,524 nodes, 614 KB
+**Latest database results (answer-weighted-v2, start word: tarse):**
+- Worst case: 6 guesses (all 2,355 answers solved)
+- Mean depth: 3.8170 guesses
+- Distribution: 0×1, 10×2, 680×3, 1402×4, 257×5, 6×6
+- Database: 16,516 nodes, 455 KB
+- Answers source: cfreshman/a03ef2cba789d8cf00c08f767e0fad7b (original embed) + 40 post-acquisition NYT additions from eithan/wordlelist
 
 **Hillclimbing findings:**
 - `tarse` is the auto-selected optimal start word (entropy over answer-weighted candidates)
 - Answer weight 1000× is optimal; higher weights (10000×, 100000×) slightly increase 6-guess count
 - Common human-chosen starts are all worse: slate(11×6), crane(12×6), crate(16×6), audio(26×6)
-- The 7 remaining six-guess words (cover, goody, joker, racer, roger, rover, woozy) are **provably unavoidable** from tarse — minimax confirms no reachable guess sequence reduces them below 6
+- The 6 remaining six-guess words (boxer, goody, joker, racer, rover, woozy) are **provably unavoidable** from tarse — minimax confirms no reachable guess sequence reduces them below 6
+- Adding the 40 missing NYT post-acquisition answers improved cover and roger from 6→5 guesses (better cluster separation), added boxer as a new 6-guess case
 
 **Architecture summary:**
 - Solver picks greedy entropy guess at all nodes; switches to alpha-beta minimax for candidate sets ≤15
 - Minimax is seeded by `greedy_worst_depth()` for a tight initial upper bound; sub-calls restrict to the candidate pool (O(K^depth) instead of O(N^depth))
 - `DEPTH_IMPOSSIBLE = std::numeric_limits<int>::max()` is the named sentinel for "budget exceeded" or "no improvement"; replaces all bare INT_MAX literals in the solver
-- All DB writes happen in a single SQLite transaction (~30s build, 614 KB output)
+- All DB writes happen in a single SQLite transaction (~30s build, 455 KB output)
 - CLI lookup: one SQL query per step, ~5ms cold / µs amortized; `next_node` and `node_info` statements are lazily prepared and cached for the connection lifetime
 
 ## Spec format
@@ -70,7 +72,7 @@ A Wordle solver that precomputes the best-known decision tree over all valid Wor
 | `tools/build_db.cpp` | Precomputation pipeline; produces the `.db` artifact |
 | `src/main.cpp` | CLI entry point (`solve`, `play`, `eval`, `info`, `dump`); validates solve targets vs answers list |
 | `data/words.txt` | 14,855 valid Wordle guesses (NYT, June 2026) |
-| `data/answers.txt` | 2,315 valid Wordle answers (NYT, June 2026) |
+| `data/answers.txt` | 2,355 valid Wordle answers (NYT, June 2026; includes 40 post-acquisition additions) |
 | `tests/test_pattern.cpp` | Pattern computation tests (all-green, duplicates, encode/decode round-trips) |
 | `tests/test_wordlist.cpp` | WordList load, lookup, and edge case tests |
 | `tests/test_solver.cpp` | PatternMatrix, partition, best_guess, and end-to-end solve tests |
