@@ -11,7 +11,7 @@ The system hillclimbs toward the best-known solution tree — minimizing worst-c
 | Start word | **tarse** (auto-selected) |
 | Words covered | 14,855 valid guesses / 2,315 answers |
 | Worst case | **6 guesses** (all 2,315 answers solved) |
-| Mean depth | **3.82 guesses** |
+| Mean depth | **3.8203 guesses** |
 | Database size | **614 KB** |
 | Per-query latency | ~5 ms (cold DB open); µs amortized |
 
@@ -43,30 +43,44 @@ cmake --build build
 ./build/build_db --output wordle.db
 ```
 
+## Testing
+
+```sh
+# Run the full test suite (43 tests, ~3s)
+ctest --test-dir build --output-on-failure
+
+# Or run the test binary directly for more verbose output
+./build/wordle_tests
+```
+
+Tests cover pattern computation (including duplicate-letter edge cases), word list loading, solver correctness, and database round-trips and integrity checking.
+
 ## Usage
 
 ```sh
 # Show the precomputed path for a word
-./build/wordle solve --db wordle.db thumb
+./build/wordle solve thumb
 # solving: thumb
 #   1. tarse  [GBBBB ]
 #   2. pinch  [BBBBY ]
 #   3. abbot  [BYBBY ]
 #   4. thumb  [GGGGG ]
-# solved in 4 guesses  (db mean: 3.8212)
+# solved in 4 guesses  (db mean: 3.8203)
 
 # Interactive solver mode (tool guesses, you supply G/Y/B responses)
-./build/wordle play --db wordle.db
+./build/wordle play
 
 # Evaluate all answer words and show statistics
-./build/wordle eval --db wordle.db
+./build/wordle eval
 
 # Show database metadata
-./build/wordle info --db wordle.db
+./build/wordle info
 
 # Dump the full decision tree (human-readable)
-./build/wordle dump --db wordle.db
+./build/wordle dump
 ```
+
+All commands accept `--db <path>` (default: `wordle.db`), `--words <path>` (default: `data/words.txt`), and `--answers <path>` (default: `data/answers.txt`) to override file locations.
 
 ## Architecture
 
@@ -74,8 +88,8 @@ cmake --build build
 - **EntropySolver** — dynamic solver used during precomputation. At each node, picks the guess maximising weighted Shannon entropy over the remaining candidate set. Answer-list words are weighted 1000× to bias the tree toward better performance on likely answers.
 - **Minimax optimizer** — for candidate sets of ≤15 words, switches from greedy entropy to alpha-beta minimax to minimise worst-case depth rather than expected depth. Seeded by the greedy result for aggressive early pruning; sub-calls restrict search to the candidate pool to keep cost O(K^depth).
 - **build_db** — precomputation pipeline. Builds the full decision tree depth-first and writes it to SQLite in a single transaction. Root guess is found in parallel; all other nodes are single-threaded.
-- **Database** — SQLite with FNV-1a checksum verified on every open. Nodes, edges, and metadata in three tables. 16,523 nodes for the full word list.
-- **wordle CLI** — thin layer over the database. Each solve step is one SQL lookup.
+- **Database** — SQLite with FNV-1a checksum verified on every open. Nodes, edges, and metadata in three tables. 16,524 nodes for the full word list. Hot-path lookup statements (`next_node`, `node_info`) are lazily prepared and cached for the lifetime of the connection.
+- **wordle CLI** — thin layer over the database. Each solve step is one SQL lookup. Solution mode validates targets against the answers list and gives a helpful error for valid-guess-but-not-answer inputs.
 
 ## Spec
 

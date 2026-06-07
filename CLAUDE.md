@@ -30,12 +30,14 @@ A Wordle solver that precomputes the best-known decision tree over all valid Wor
 - [x] CLI tool — `wordle` binary; `solve`, `play`, `eval`, `info`, `dump` modes
 - [x] Database integrity — FNV-1a checksum on every open
 - [x] Hillclimbing — answer-weighted entropy (1000×), minimax, alternative start words
+- [x] Test suite — Catch2 v3, 43 tests, `ctest` in ~3s (pattern, wordlist, solver, database)
+- [x] Code quality — `DEPTH_IMPOSSIBLE` constant, cached DB statements, uint16_t overflow guard, mode_solve answers validation, FNV hash correctness
 
 **Latest database results (answer-weighted-v1, start word: tarse):**
 - Worst case: 6 guesses (all 2,315 answers solved)
-- Mean depth: 3.8212 guesses
+- Mean depth: 3.8203 guesses (stored: 3.820302)
 - Distribution: 0×1, 10×2, 655×3, 1396×4, 247×5, 7×6
-- Database size: 614 KB
+- Database: 16,524 nodes, 614 KB
 
 **Hillclimbing findings:**
 - `tarse` is the auto-selected optimal start word (entropy over answer-weighted candidates)
@@ -46,8 +48,9 @@ A Wordle solver that precomputes the best-known decision tree over all valid Wor
 **Architecture summary:**
 - Solver picks greedy entropy guess at all nodes; switches to alpha-beta minimax for candidate sets ≤15
 - Minimax is seeded by `greedy_worst_depth()` for a tight initial upper bound; sub-calls restrict to the candidate pool (O(K^depth) instead of O(N^depth))
-- All DB writes happen in a single SQLite transaction (~30s build, 614KB output)
-- CLI lookup: one SQL query per step, ~5ms cold / µs amortized
+- `DEPTH_IMPOSSIBLE = std::numeric_limits<int>::max()` is the named sentinel for "budget exceeded" or "no improvement"; replaces all bare INT_MAX literals in the solver
+- All DB writes happen in a single SQLite transaction (~30s build, 614 KB output)
+- CLI lookup: one SQL query per step, ~5ms cold / µs amortized; `next_node` and `node_info` statements are lazily prepared and cached for the connection lifetime
 
 ## Spec format
 
@@ -61,13 +64,17 @@ A Wordle solver that precomputes the best-known decision tree over all valid Wor
 | `README.md` | Project overview and usage |
 | `CLAUDE.md` | This file |
 | `src/pattern.hpp/cpp` | Wordle pattern computation (G/Y/B encoding, 243 patterns) |
-| `src/wordlist.hpp/cpp` | Sorted word list with O(log N) lookup |
-| `src/solver.hpp/cpp` | `EntropySolver`: weighted entropy + minimax optimizer |
-| `src/database.hpp/cpp` | SQLite-backed decision tree (read/write, checksum, metadata) |
+| `src/wordlist.hpp/cpp` | Sorted word list with O(log N) lookup; rejects lists > 65,535 entries |
+| `src/solver.hpp/cpp` | `EntropySolver`: weighted entropy + minimax optimizer; `DEPTH_IMPOSSIBLE` sentinel |
+| `src/database.hpp/cpp` | SQLite-backed decision tree (read/write, checksum, metadata, cached hot-path stmts) |
 | `tools/build_db.cpp` | Precomputation pipeline; produces the `.db` artifact |
-| `src/main.cpp` | CLI entry point (`solve`, `play`, `eval`, `info`, `dump`) |
+| `src/main.cpp` | CLI entry point (`solve`, `play`, `eval`, `info`, `dump`); validates solve targets vs answers list |
 | `data/words.txt` | 14,855 valid Wordle guesses (NYT, June 2026) |
 | `data/answers.txt` | 2,315 valid Wordle answers (NYT, June 2026) |
+| `tests/test_pattern.cpp` | Pattern computation tests (all-green, duplicates, encode/decode round-trips) |
+| `tests/test_wordlist.cpp` | WordList load, lookup, and edge case tests |
+| `tests/test_solver.cpp` | PatternMatrix, partition, best_guess, and end-to-end solve tests |
+| `tests/test_database.cpp` | Database CRUD, metadata round-trip, integrity checking, cached-statement tests |
 
 ## Available agents and tools
 

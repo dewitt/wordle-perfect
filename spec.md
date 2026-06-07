@@ -41,7 +41,7 @@ No valid answer word requires more than 6 guesses to solve via the precomputed d
 ## Assumptions
 
 ### build_environment
-The project uses Nix flakes for hermetic, reproducible builds, with direnv (`.envrc`) for automatic environment activation. All compiler toolchains, dependencies, and build tools are declared in `flake.nix`. This ensures precomputation runs and CLI builds are reproducible across machines and CI environments.
+The project uses Nix flakes for hermetic, reproducible builds, with direnv (`.envrc`) for automatic environment activation. All compiler toolchains, dependencies, and build tools are declared in `flake.nix`. This ensures precomputation runs and CLI builds are reproducible across machines and CI environments. A test suite (Catch2 v3, invocable via `ctest`) is included and must pass before any database artifact is published.
 
 ### database_format_default
 The database format is not mandated by this spec; the implementation may use SQLite, a flat binary file, or another format. SQLite is preferred for its built-in integrity tooling and inspectability; a proprietary binary format is acceptable if it materially reduces lookup latency or file size, provided the debug_dump_tool invariant is satisfied.
@@ -96,7 +96,7 @@ The valid guess word list and valid answer word list are sourced from the NYT Wo
 
 **When** the user runs the tool in solution mode with a word that is not in the valid answer word list
 
-**Then** the tool writes an error message to stderr and exits with a non-zero status
+**Then** the tool writes an error message to stderr and exits with a non-zero status; if the word is a valid guess word but not an answer word, the error message distinguishes that case explicitly
 
 ### solution_mode_known_answer
 
