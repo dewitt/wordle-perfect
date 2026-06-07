@@ -128,7 +128,7 @@ static void mode_play(const Database& db, const WordList& words) {
 
         std::string resp;
         while (true) {
-            std::getline(std::cin, resp);
+            if (!std::getline(std::cin, resp)) die("unexpected end of input");
             if (!valid_response_string(resp)) {
                 std::println(stderr,
                     "invalid response '{}': enter exactly 5 characters, each G, Y, or B",
@@ -141,6 +141,7 @@ static void mode_play(const Database& db, const WordList& words) {
         }
 
         Pattern p = encode_response(resp);
+        if (p == 0xFF) die("internal error: encode_response returned invalid pattern");
 
         // Consistency check: verify this response is compatible with all prior
         // (guess, response) pairs by ensuring the implied answer constraints agree.

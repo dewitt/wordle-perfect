@@ -239,8 +239,8 @@ evaluate(const Database& db, const WordList& words, const WordList& answers) {
         int      depth = 0;
         bool     solved = false;
 
-        // Follow the tree until GGGGG or a missing edge (max 20 to avoid runaway)
-        for (int round = 1; round <= 20; ++round) {
+        // Follow the tree until GGGGG or a missing edge (cap at 6 — the game limit)
+        for (int round = 1; round <= 6; ++round) {
             auto info = db.node_info(node);
             if (!info) break;
             auto [word_idx, d] = *info;
@@ -300,7 +300,10 @@ int main(int argc, char** argv) {
     if (auto v = consume("--strategy");      !v.empty()) strategy      = v;
     if (auto v = consume("--start-word");    !v.empty()) start_word    = v;
     if (auto v = consume("--answer-weight"); !v.empty()) answer_weight = std::stod(std::string(v));
-    if (auto v = consume("--jobs");          !v.empty()) nthreads      = static_cast<unsigned>(std::stoi(std::string(v)));
+    if (auto v = consume("--jobs");          !v.empty()) {
+        nthreads = static_cast<unsigned>(std::stoi(std::string(v)));
+        if (nthreads == 0) nthreads = std::max(1u, std::thread::hardware_concurrency());
+    }
 
     // ── Word lists ────────────────────────────────────────────────────────
     std::print("loading words from {}... ", words_path);

@@ -98,15 +98,12 @@ uint16_t EntropySolver::best_guess(std::span<const uint16_t> candidates,
     // If only 2 candidates remain, guess one of them directly
     if (candidates.size() == 2) return candidates[0];
 
-    const std::size_t n = words_.size();
-
     // Determine which pool of words to search
-    std::span<const uint16_t> cand_span = candidates;
     std::vector<uint16_t> all_idx;
     std::span<const uint16_t> guess_pool;
 
     if (restrict_to_candidates) {
-        guess_pool = cand_span;
+        guess_pool = candidates;
     } else {
         all_idx = words_.all_indices();
         guess_pool = all_idx;
@@ -131,7 +128,6 @@ uint16_t EntropySolver::best_guess(std::span<const uint16_t> candidates,
             best_word = gi;
         }
     }
-    (void)n;
     return best_word;
 }
 

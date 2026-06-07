@@ -29,10 +29,10 @@ std::string db_errmsg(sqlite3* db) {
 }
 
 // Simple FNV-1a 64-bit hash used as the content checksum
+static constexpr uint64_t FNV_PRIME  = 0x00000100000001B3ULL;
+static constexpr uint64_t FNV_OFFSET = 0xcbf29ce484222325ULL;
+
 uint64_t fnv1a_update(uint64_t h, const void* data, std::size_t len) noexcept {
-    static constexpr uint64_t FNV_PRIME  = 0x00000100000001B3ULL;
-    static constexpr uint64_t FNV_OFFSET = 0xcbf29ce484222325ULL;
-    if (h == 0) h = FNV_OFFSET;
     const auto* p = static_cast<const uint8_t*>(data);
     for (std::size_t i = 0; i < len; ++i) {
         h ^= p[i];
@@ -121,10 +121,12 @@ std::expected<void, std::string> Database::init_schema() {
 // ---------------------------------------------------------------------------
 std::string Database::compute_content_hash() const {
     // Hash all (id, word_idx, depth) rows then all (parent, pattern, child) rows
-    uint64_t h = 0;
+    uint64_t h = FNV_OFFSET;
     {
         StmtGuard st;
-        sqlite3_prepare_v2(db_, "SELECT id, word_idx, depth FROM nodes ORDER BY id", -1, &st, nullptr);
+        if (sqlite3_prepare_v2(db_, "SELECT id, word_idx, depth FROM nodes ORDER BY id",
+                               -1, &st, nullptr) != SQLITE_OK)
+            return {};  // empty string signals prepare failure to caller
         while (sqlite3_step(*st) == SQLITE_ROW) {
             int64_t vals[3] = {
                 sqlite3_column_int64(*st, 0),
@@ -136,7 +138,9 @@ std::string Database::compute_content_hash() const {
     }
     {
         StmtGuard st;
-        sqlite3_prepare_v2(db_, "SELECT parent, pattern, child FROM edges ORDER BY parent, pattern", -1, &st, nullptr);
+        if (sqlite3_prepare_v2(db_, "SELECT parent, pattern, child FROM edges ORDER BY parent, pattern",
+                               -1, &st, nullptr) != SQLITE_OK)
+            return {};
         while (sqlite3_step(*st) == SQLITE_ROW) {
             int64_t vals[3] = {
                 sqlite3_column_int64(*st, 0),
@@ -159,6 +163,8 @@ std::expected<void, std::string> Database::verify_integrity() const {
     std::string stored = reinterpret_cast<const char*>(sqlite3_column_text(*st, 0));
     std::string computed = compute_content_hash();
 
+    if (computed.empty())
+        return std::unexpected("failed to compute content hash (database read error)");
     if (stored != computed)
         return std::unexpected(std::format(
             "checksum mismatch: stored={} computed={}", stored, computed));
@@ -183,7 +189,8 @@ std::expected<DbMetadata, std::string> Database::read_metadata() const {
     m.answers_source  = get("answers_source");
     m.strategy        = get("strategy");
     m.start_word      = get("start_word");
-    m.worst_case_depth = std::stoi(get("worst_case_depth").empty() ? "0" : get("worst_case_depth"));
+    auto wcd = get("worst_case_depth");
+    m.worst_case_depth = wcd.empty() ? 0 : std::stoi(wcd);
     auto md = get("mean_depth");
     m.mean_depth      = md.empty() ? 0.0 : std::stod(md);
     auto tn = get("total_nodes");
@@ -196,32 +203,43 @@ std::expected<DbMetadata, std::string> Database::read_metadata() const {
 }
 
 std::expected<void, std::string> Database::write_metadata(const DbMetadata& m) {
-    auto set = [&](const char* key, const std::string& val) -> bool {
+    auto set = [&](const char* key, const std::string& val) -> std::expected<void, std::string> {
         StmtGuard st;
-        int rc = sqlite3_prepare_v2(db_,
-            "INSERT OR REPLACE INTO metadata(key,value) VALUES(?,?)", -1, &st, nullptr);
-        if (rc != SQLITE_OK) return false;
+        if (sqlite3_prepare_v2(db_,
+                "INSERT OR REPLACE INTO metadata(key,value) VALUES(?,?)",
+                -1, &st, nullptr) != SQLITE_OK)
+            return std::unexpected(db_errmsg(db_));
         sqlite3_bind_text(*st, 1, key, -1, SQLITE_STATIC);
         sqlite3_bind_text(*st, 2, val.c_str(), -1, SQLITE_TRANSIENT);
-        return sqlite3_step(*st) == SQLITE_DONE;
+        if (sqlite3_step(*st) != SQLITE_DONE)
+            return std::unexpected(db_errmsg(db_));
+        return {};
     };
 
-    char* errmsg{};
-    sqlite3_exec(db_, "BEGIN", nullptr, nullptr, &errmsg);
+    if (auto r = begin_transaction(); !r) return r;
 
-    set("words_source",    m.words_source);
-    set("words_date",      m.words_date);
-    set("answers_source",  m.answers_source);
-    set("strategy",        m.strategy);
-    set("start_word",      m.start_word);
-    set("worst_case_depth", std::to_string(m.worst_case_depth));
-    set("mean_depth",      std::format("{:.6f}", m.mean_depth));
-    set("total_nodes",     std::to_string(m.total_nodes));
-    set("total_words",     std::to_string(m.total_words));
-    set("total_answers",   std::to_string(m.total_answers));
+    auto rollback = [&]() {
+        char* em{};
+        sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, &em);
+        sqlite3_free(em);
+    };
 
-    sqlite3_exec(db_, "COMMIT", nullptr, nullptr, &errmsg);
-    return {};
+    for (auto [key, val] : {
+            std::pair{"words_source",     m.words_source},
+            std::pair{"words_date",       m.words_date},
+            std::pair{"answers_source",   m.answers_source},
+            std::pair{"strategy",         m.strategy},
+            std::pair{"start_word",       m.start_word},
+            std::pair{"worst_case_depth", std::to_string(m.worst_case_depth)},
+            std::pair{"mean_depth",       std::format("{:.6f}", m.mean_depth)},
+            std::pair{"total_nodes",      std::to_string(m.total_nodes)},
+            std::pair{"total_words",      std::to_string(m.total_words)},
+            std::pair{"total_answers",    std::to_string(m.total_answers)},
+        }) {
+        if (auto r = set(key, val); !r) { rollback(); return r; }
+    }
+
+    return commit_transaction();
 }
 
 // ---------------------------------------------------------------------------
@@ -251,7 +269,7 @@ std::expected<uint16_t, std::string>
 Database::next_word(uint32_t node_id, Pattern pattern) const {
     auto child = next_node(node_id, pattern);
     if (!child) return std::unexpected(child.error());
-    if (*child == NULL_NODE) return static_cast<uint16_t>(NULL_NODE);
+    if (*child == NULL_NODE) return WordList::NPOS;
 
     auto info = node_info(*child);
     if (!info) return std::unexpected(info.error());
@@ -337,24 +355,35 @@ Database::insert_edge(uint32_t parent, Pattern pattern, uint32_t child) {
 }
 
 std::expected<void, std::string> Database::finalize(const DbMetadata& meta) {
-    // Create index on edges for fast lookup
-    char* errmsg{};
-    sqlite3_exec(db_,
-        "CREATE INDEX IF NOT EXISTS idx_edges ON edges(parent, pattern)",
-        nullptr, nullptr, &errmsg);
+    // Note: edges uses WITHOUT ROWID with PRIMARY KEY (parent, pattern) — no
+    // additional index needed; the PK B-tree already covers the lookup.
 
-    // Write metadata
+    // Write metadata (in its own transaction)
     if (auto r = write_metadata(meta); !r) return r;
 
-    // Compute and store checksum
+    // Compute and store checksum in a single transaction so DELETE+INSERT
+    // are atomic — a crash between them would leave the DB intact but
+    // unverifiable on next open.
     std::string hash = compute_content_hash();
+    if (hash.empty())
+        return std::unexpected("failed to compute content hash");
+
+    if (auto r = begin_transaction(); !r) return r;
+
+    char* errmsg{};
     sqlite3_exec(db_, "DELETE FROM checksum", nullptr, nullptr, &errmsg);
+    sqlite3_free(errmsg);
+    errmsg = nullptr;
+
     StmtGuard st;
-    sqlite3_prepare_v2(db_, "INSERT INTO checksum(hash) VALUES(?)", -1, &st, nullptr);
+    if (sqlite3_prepare_v2(db_, "INSERT INTO checksum(hash) VALUES(?)",
+                           -1, &st, nullptr) != SQLITE_OK)
+        return std::unexpected("failed to prepare checksum insert: " + db_errmsg(db_));
     sqlite3_bind_text(*st, 1, hash.c_str(), -1, SQLITE_TRANSIENT);
     if (sqlite3_step(*st) != SQLITE_DONE)
-        return std::unexpected("failed to write checksum");
-    return {};
+        return std::unexpected("failed to write checksum: " + db_errmsg(db_));
+
+    return commit_transaction();
 }
 
 // ---------------------------------------------------------------------------
