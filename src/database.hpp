@@ -77,6 +77,9 @@ public:
     [[nodiscard]] std::expected<uint16_t, std::string> root_word() const;
 
     // Build helpers — used by build_db during precomputation
+    [[nodiscard]] std::expected<void, std::string> begin_transaction();
+    [[nodiscard]] std::expected<void, std::string> commit_transaction();
+
     [[nodiscard]] std::expected<uint32_t, std::string>
     insert_node(uint32_t id, uint16_t word_idx, uint8_t depth);
 

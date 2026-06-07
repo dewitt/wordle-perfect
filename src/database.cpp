@@ -284,6 +284,24 @@ std::expected<uint16_t, std::string> Database::root_word() const {
 // ---------------------------------------------------------------------------
 // Build helpers
 // ---------------------------------------------------------------------------
+std::expected<void, std::string> Database::begin_transaction() {
+    char* errmsg{};
+    if (sqlite3_exec(db_, "BEGIN", nullptr, nullptr, &errmsg) != SQLITE_OK) {
+        std::string err = errmsg; sqlite3_free(errmsg);
+        return std::unexpected(err);
+    }
+    return {};
+}
+
+std::expected<void, std::string> Database::commit_transaction() {
+    char* errmsg{};
+    if (sqlite3_exec(db_, "COMMIT", nullptr, nullptr, &errmsg) != SQLITE_OK) {
+        std::string err = errmsg; sqlite3_free(errmsg);
+        return std::unexpected(err);
+    }
+    return {};
+}
+
 std::expected<uint32_t, std::string>
 Database::insert_node(uint32_t id, uint16_t word_idx, uint8_t depth) {
     StmtGuard st;

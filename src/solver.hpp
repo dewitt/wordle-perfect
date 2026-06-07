@@ -5,6 +5,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <span>
 #include <vector>
 
@@ -53,8 +54,14 @@ struct SolveResult {
 // ---------------------------------------------------------------------------
 // EntropySolver — greedy, information-theoretic dynamic solver
 //
-// At each step, picks the guess that maximises the Shannon entropy of the
-// partition of remaining candidates by pattern. Ties broken lexicographically.
+// At each step, picks the guess that maximises the weighted Shannon entropy of
+// the partition of remaining candidates by pattern. Ties broken by preferring
+// candidates over non-candidates, then lexicographically.
+//
+// Weighted entropy: each candidate word carries a weight. Setting higher
+// weights for words in the curated answer list biases the tree toward
+// minimising solve depth for those words specifically, while still building
+// valid paths to all words.
 //
 // This is the intermediate-artifact solver used for:
 //   • Interactive solver mode (fallback when database is absent)
@@ -63,8 +70,13 @@ struct SolveResult {
 // ---------------------------------------------------------------------------
 class EntropySolver {
 public:
-    EntropySolver(const WordList& words, const PatternMatrix& patterns)
-        : words_{words}, patterns_{patterns} {}
+    // weight_fn(word_idx) → weight for that word. Default: uniform weight 1.
+    // Answer-weighted: return 1000 if word is in answers list, 1 otherwise.
+    using WeightFn = std::function<double(uint16_t)>;
+
+    explicit EntropySolver(const WordList& words, const PatternMatrix& patterns,
+                           WeightFn weight_fn = {})
+        : words_{words}, patterns_{patterns}, weight_fn_{std::move(weight_fn)} {}
 
     // Partition `candidates` by their pattern against `guess_idx`.
     [[nodiscard]] static std::array<std::vector<uint16_t>, PATTERN_COUNT>
@@ -83,14 +95,19 @@ public:
     [[nodiscard]] SolveResult solve(uint16_t answer_idx) const;
 
 private:
-    // Compute Shannon entropy of a bucket-size distribution.
-    [[nodiscard]] static double entropy(
+    // Compute weighted Shannon entropy.
+    [[nodiscard]] double entropy(
         std::span<const uint16_t> candidates,
         uint16_t                  guess_idx,
-        const PatternMatrix&      pm) noexcept;
+        const PatternMatrix&      pm) const noexcept;
 
     const WordList&      words_;
     const PatternMatrix& patterns_;
+    WeightFn             weight_fn_;  // null → uniform weight
+
+    double weight_of(uint16_t idx) const noexcept {
+        return weight_fn_ ? weight_fn_(idx) : 1.0;
+    }
 };
 
 } // namespace wp

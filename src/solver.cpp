@@ -64,20 +64,26 @@ EntropySolver::partition(std::span<const uint16_t> candidates,
 }
 
 // ---------------------------------------------------------------------------
-// EntropySolver::entropy (private)
+// EntropySolver::entropy (private) — weighted Shannon entropy
 // ---------------------------------------------------------------------------
 double EntropySolver::entropy(std::span<const uint16_t> candidates,
                               uint16_t                  guess_idx,
-                              const PatternMatrix&      pm) noexcept {
-    std::array<int, PATTERN_COUNT> counts{};
+                              const PatternMatrix&      pm) const noexcept {
+    std::array<double, PATTERN_COUNT> bucket_weight{};
+    double total_weight = 0.0;
+
     for (uint16_t ai : candidates) {
-        counts[pm.get(guess_idx, ai)]++;
+        double w = weight_of(ai);
+        bucket_weight[pm.get(guess_idx, ai)] += w;
+        total_weight += w;
     }
-    const double n = static_cast<double>(candidates.size());
+
+    if (total_weight == 0.0) return 0.0;
+
     double H = 0.0;
-    for (int c : counts) {
-        if (c > 0) {
-            double p = static_cast<double>(c) / n;
+    for (double bw : bucket_weight) {
+        if (bw > 0.0) {
+            double p = bw / total_weight;
             H -= p * std::log2(p);
         }
     }

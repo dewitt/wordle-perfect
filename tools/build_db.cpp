@@ -4,7 +4,6 @@
 #include "database.hpp"
 
 #include <algorithm>
-#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -42,23 +41,30 @@ static double elapsed_s(Clock::time_point t0) {
 //     Ties go to lexicographically earlier words (via EntropySolver).
 // ---------------------------------------------------------------------------
 struct TreeBuilder {
-    const WordList&      words;
-    const PatternMatrix& pm;
-    Database&            db;
-    EntropySolver        solver;
-    unsigned             nthreads;
+    const WordList&        words;
+    const PatternMatrix&   pm;
+    Database&              db;
+    EntropySolver          solver;
+    unsigned               nthreads;
+    EntropySolver::WeightFn weight_fn;  // may be null (uniform)
 
     uint32_t next_id{0};
     uint64_t nodes_written{0};
     int      max_depth_seen{0};
 
-    TreeBuilder(const WordList& w, const PatternMatrix& p, Database& d, unsigned t)
-        : words{w}, pm{p}, db{d}, solver{w, p}, nthreads{t} {}
+    TreeBuilder(const WordList& w, const PatternMatrix& p, Database& d, unsigned t,
+                EntropySolver::WeightFn wf = {})
+        : words{w}, pm{p}, db{d}, solver{w, p, wf}, nthreads{t}, weight_fn{wf} {}
 
-    // Entry point: build the entire tree, return root node id (always 0)
+    // Entry point: build the entire tree wrapped in a single transaction.
     uint32_t build() {
+        // Wrapping in one transaction turns ~16k individual auto-commits into a
+        // single fsync — reduces build time by 100x–1000x on SQLite.
+        if (auto r = db.begin_transaction(); !r) die(r.error());
         auto all_candidates = words.all_indices();
-        return build_node(all_candidates, 1);
+        uint32_t root = build_node(all_candidates, 1);
+        if (auto r = db.commit_transaction(); !r) die(r.error());
+        return root;
     }
 
 private:
@@ -119,23 +125,29 @@ private:
                     uint16_t best_word = start;
                     bool     best_is_cand = false;
 
-                    // Check if a given index is in the candidate set (sorted)
                     auto is_cand = [&](uint16_t gi) {
                         return std::ranges::binary_search(candidates, gi);
                     };
+                    auto w = [this](uint16_t ai) -> double {
+                        return weight_fn ? weight_fn(ai) : 1.0;
+                    };
 
                     for (uint16_t gi = start; gi < end; ++gi) {
-                        // Compute entropy
-                        std::array<int, PATTERN_COUNT> counts{};
+                        // Weighted Shannon entropy
+                        std::array<double, PATTERN_COUNT> bw{};
+                        double total_w = 0.0;
                         for (uint16_t ai : candidates) {
-                            counts[pm.get(gi, ai)]++;
+                            double wi = w(ai);
+                            bw[pm.get(gi, ai)] += wi;
+                            total_w += wi;
                         }
-                        const double n = static_cast<double>(candidates.size());
                         double H = 0.0;
-                        for (int c : counts) {
-                            if (c > 0) {
-                                double p = static_cast<double>(c) / n;
-                                H -= p * std::log2(p);
+                        if (total_w > 0.0) {
+                            for (double b : bw) {
+                                if (b > 0.0) {
+                                    double p = b / total_w;
+                                    H -= p * std::log2(p);
+                                }
                             }
                         }
 
@@ -146,8 +158,8 @@ private:
                             (H == best_H && gi_is_cand == best_is_cand && gi < best_word);
 
                         if (better) {
-                            best_H     = H;
-                            best_word  = gi;
+                            best_H       = H;
+                            best_word    = gi;
                             best_is_cand = gi_is_cand;
                         }
                     }
@@ -177,41 +189,57 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// Evaluate mean/worst depth over answers list
+// Evaluate mean/worst depth over answers list — no artificial round cap
 // ---------------------------------------------------------------------------
-static std::pair<double, int>
+struct EvalResult {
+    double mean;
+    int    worst;
+    int    failures;   // words not solved (missing tree path)
+    int    solved;
+    std::array<int, 16> dist{};  // dist[depth] = count; depth 0 unused
+};
+
+static EvalResult
 evaluate(const Database& db, const WordList& words, const WordList& answers) {
     double total = 0.0;
-    int    worst = 0;
-    int    count = 0;
+    EvalResult res{};
 
     for (auto& w : answers.span()) {
         auto idx = words.index_of(w.view());
         if (idx == WordList::NPOS) continue;
-        ++count;
 
         uint32_t node  = Database::ROOT_ID;
         int      depth = 0;
+        bool     solved = false;
 
-        for (int round = 1; round <= 6; ++round) {
+        // Follow the tree until GGGGG or a missing edge (max 20 to avoid runaway)
+        for (int round = 1; round <= 20; ++round) {
             auto info = db.node_info(node);
             if (!info) break;
             auto [word_idx, d] = *info;
 
             Pattern p = compute_pattern(words[word_idx].view(), w.view());
             depth = round;
-            if (p == PATTERN_SOLVED) break;
+
+            if (p == PATTERN_SOLVED) { solved = true; break; }
 
             auto nxt = db.next_node(node, p);
-            if (!nxt) break;
+            if (!nxt) break;   // missing edge — tree incomplete for this word
             node = *nxt;
         }
 
-        total += depth;
-        if (depth > worst) worst = depth;
+        if (solved) {
+            ++res.solved;
+            total += depth;
+            if (depth > res.worst) res.worst = depth;
+            if (depth < static_cast<int>(res.dist.size())) res.dist[depth]++;
+        } else {
+            ++res.failures;
+        }
     }
 
-    return {count > 0 ? total / count : 0.0, worst};
+    res.mean = res.solved > 0 ? total / res.solved : 0.0;
+    return res;
 }
 
 // ---------------------------------------------------------------------------
@@ -235,10 +263,13 @@ int main(int argc, char** argv) {
         return {};
     };
 
-    if (auto v = consume("--words");   !v.empty()) words_path   = v;
-    if (auto v = consume("--answers"); !v.empty()) answers_path = v;
-    if (auto v = consume("--output");  !v.empty()) out_path     = v;
-    if (auto v = consume("--jobs");    !v.empty()) nthreads = static_cast<unsigned>(std::stoi(std::string(v)));
+    std::string strategy = "answer-weighted-v1";  // default
+
+    if (auto v = consume("--words");    !v.empty()) words_path = v;
+    if (auto v = consume("--answers");  !v.empty()) answers_path = v;
+    if (auto v = consume("--output");   !v.empty()) out_path = v;
+    if (auto v = consume("--strategy"); !v.empty()) strategy = v;
+    if (auto v = consume("--jobs");     !v.empty()) nthreads = static_cast<unsigned>(std::stoi(std::string(v)));
 
     // ── Word lists ────────────────────────────────────────────────────────
     std::print("loading words from {}... ", words_path);
@@ -271,31 +302,51 @@ int main(int argc, char** argv) {
     if (!db) die(db.error());
     std::println("ok");
 
+    // ── Weight function ───────────────────────────────────────────────────
+    // Build a set of answer indices for O(1) membership test
+    std::vector<uint16_t> answer_indices;
+    for (auto& w : ans->span()) {
+        auto idx = wl->index_of(w.view());
+        if (idx != WordList::NPOS) answer_indices.push_back(idx);
+    }
+    std::ranges::sort(answer_indices);
+
+    EntropySolver::WeightFn weight_fn;
+    if (strategy == "entropy-greedy-v1") {
+        weight_fn = {};  // uniform
+    } else {
+        // answer-weighted: curated answer words count 1000x more than others
+        weight_fn = [&answer_indices](uint16_t idx) -> double {
+            return std::ranges::binary_search(answer_indices, idx) ? 1000.0 : 1.0;
+        };
+    }
+
     // ── Tree building ─────────────────────────────────────────────────────
-    std::println("building decision tree ({} threads)...", nthreads);
+    std::println("building decision tree (strategy={}, {} threads)...", strategy, nthreads);
     t0 = Clock::now();
 
-    TreeBuilder builder{*wl, pm, *db, nthreads};
+    TreeBuilder builder{*wl, pm, *db, nthreads, weight_fn};
     builder.build();
 
     std::println("tree built in {:.1f}s  ({} nodes, max depth {})",
         elapsed_s(t0), builder.nodes_written, builder.max_depth_seen);
 
-    // ── Evaluate ──────────────────────────────────────────────────────────
+    // ── Evaluate (no depth cap — real worst case) ─────────────────────────
     std::print("evaluating against {} answers... ", ans->size());
     std::cout.flush();
-    auto [mean, worst] = evaluate(*db, *wl, *ans);
-    std::println("worst={} mean={:.4f}", worst, mean);
+    auto ev = evaluate(*db, *wl, *ans);
+    std::println("worst={} mean={:.4f} solved={} failures={}",
+        ev.worst, ev.mean, ev.solved, ev.failures);
 
     // ── Finalize ──────────────────────────────────────────────────────────
     DbMetadata meta{
         .words_source    = "https://gist.github.com/SukkaW/92ff13af03a0117e5bafec6c7f7d6dce",
         .words_date      = "2026-06-07",
         .answers_source  = "https://gist.github.com/cfreshman/a03ef2cba789d8cf00c08f767e0fad7b",
-        .strategy        = "entropy-greedy-v1",
+        .strategy        = strategy,
         .start_word      = {},
-        .worst_case_depth = worst,
-        .mean_depth      = mean,
+        .worst_case_depth = ev.worst,
+        .mean_depth      = ev.mean,
         .total_nodes     = static_cast<int>(builder.nodes_written),
         .total_words     = static_cast<int>(wl->size()),
         .total_answers   = static_cast<int>(ans->size()),
@@ -308,9 +359,14 @@ int main(int argc, char** argv) {
 
     std::println("done.");
     std::println("  start word  : {}", meta.start_word);
-    std::println("  worst case  : {} guesses", worst);
-    std::println("  mean depth  : {:.4f} guesses", mean);
+    std::println("  worst case  : {} guesses", ev.worst);
+    std::println("  mean depth  : {:.4f} guesses", ev.mean);
+    std::println("  failures    : {}", ev.failures);
     std::println("  total nodes : {}", builder.nodes_written);
+    std::println("  distribution:");
+    for (int i = 1; i < static_cast<int>(ev.dist.size()); ++i) {
+        if (ev.dist[i] > 0) std::println("    {} guesses: {}", i, ev.dist[i]);
+    }
 
     return 0;
 }
