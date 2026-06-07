@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <limits>
 #include <thread>
 #include <vector>
 
@@ -147,7 +146,7 @@ int EntropySolver::greedy_worst_depth(std::span<const uint16_t> candidates,
                                       int depth_budget) const noexcept {
     if (candidates.empty()) return 0;
     if (candidates.size() == 1) return 1;
-    if (depth_budget <= 0)      return std::numeric_limits<int>::max();
+    if (depth_budget <= 0)      return DEPTH_IMPOSSIBLE;
 
     uint16_t guess   = best_guess(candidates);
     auto     buckets = partition(candidates, guess, patterns_);
@@ -156,7 +155,7 @@ int EntropySolver::greedy_worst_depth(std::span<const uint16_t> candidates,
     for (Pattern p = 0; p < PATTERN_COUNT - 1; ++p) {
         if (buckets[p].empty()) continue;
         int d = greedy_worst_depth(buckets[p], depth_budget - 1);
-        if (d == std::numeric_limits<int>::max()) return d;
+        if (d == DEPTH_IMPOSSIBLE) return d;
         worst = std::max(worst, 1 + d);
     }
     return worst;
@@ -180,7 +179,7 @@ EntropySolver::minimax_best_guess(std::span<const uint16_t> candidates,
     // If greedy already achieves depth ≤ 2 or the budget is blown, skip the
     // full minimax search. No guess can improve on depth 2 for 2+ candidates
     // (you need at least 1 guess to distinguish + 1 more to answer = 2).
-    if (seed_depth <= 2 || seed_depth == std::numeric_limits<int>::max())
+    if (seed_depth <= 2 || seed_depth == DEPTH_IMPOSSIBLE)
         return {best_guess(candidates), seed_depth};
 
     // Search for strictly better than greedy. If nothing improves, the caller
@@ -203,7 +202,7 @@ EntropySolver::minimax_inner(std::span<const uint16_t> candidates,
                              bool restrict_to_candidates) const {
     if (candidates.empty()) return {WordList::NPOS, 0};
     if (candidates.size() == 1) return {candidates[0], 1};
-    if (depth_budget <= 0)      return {WordList::NPOS, std::numeric_limits<int>::max()};
+    if (depth_budget <= 0)      return {WordList::NPOS, DEPTH_IMPOSSIBLE};
 
     const std::size_t n = words_.size();
 
@@ -231,7 +230,7 @@ EntropySolver::minimax_inner(std::span<const uint16_t> candidates,
         // But even singleton non-GGGGG buckets give 1 + 1 = 2 ≥ prune_at = 2.
         // So all guesses fail. (Caught by the early exit above, but guard here
         // for recursive calls where prune_at ≤ 2.)
-        if (prune_at <= 2) return std::numeric_limits<int>::max();
+        if (prune_at <= 2) return DEPTH_IMPOSSIBLE;
 
         // First pass: count how many candidates fall in each pattern bucket.
         std::array<uint8_t, PATTERN_COUNT> counts{};
@@ -244,7 +243,7 @@ EntropySolver::minimax_inner(std::span<const uint16_t> candidates,
             const auto cnt = counts[p];
             if (cnt == 0) continue;
 
-            if (depth_budget - 1 <= 0) return std::numeric_limits<int>::max();
+            if (depth_budget - 1 <= 0) return DEPTH_IMPOSSIBLE;
 
             int sub;
             if (cnt == 1) {
@@ -258,7 +257,7 @@ EntropySolver::minimax_inner(std::span<const uint16_t> candidates,
                 if (prune_at - 1 <= 2) {
                     // 1 + sub ≥ 1 + 2 = 3 ≥ prune_at (since prune_at == 3)
                     // → prune immediately without building sub-bucket.
-                    return std::numeric_limits<int>::max();
+                    return DEPTH_IMPOSSIBLE;
                 }
                 std::vector<uint16_t> sub_bucket;
                 sub_bucket.reserve(cnt);
@@ -272,11 +271,11 @@ EntropySolver::minimax_inner(std::span<const uint16_t> candidates,
                 sub = s;
             }
 
-            if (sub == std::numeric_limits<int>::max())
-                return std::numeric_limits<int>::max();
+            if (sub == DEPTH_IMPOSSIBLE)
+                return DEPTH_IMPOSSIBLE;
 
             worst = std::max(worst, 1 + sub);
-            if (worst >= prune_at) return std::numeric_limits<int>::max(); // prune
+            if (worst >= prune_at) return DEPTH_IMPOSSIBLE; // prune
         }
         return worst;
     };
@@ -286,7 +285,7 @@ EntropySolver::minimax_inner(std::span<const uint16_t> candidates,
 
     for (uint16_t gi : candidates) {
         int w = eval_guess(gi, best_worst);
-        if (w == std::numeric_limits<int>::max()) continue;
+        if (w == DEPTH_IMPOSSIBLE) continue;
 
         bool better = w < best_worst ||
                       (w == best_worst && !best_is_candidate) ||
@@ -302,17 +301,21 @@ EntropySolver::minimax_inner(std::span<const uint16_t> candidates,
     // Then try non-candidates (skip when restrict_to_candidates is set,
     // e.g. in sub-calls where the cost would be O(N^depth)).
     if (!restrict_to_candidates) {
-        for (uint16_t gi = 0; gi < static_cast<uint16_t>(n); ++gi) {
-            if (std::ranges::binary_search(candidates, gi)) continue; // already tried
+        // Use std::size_t to avoid uint16_t overflow if word list ever grows
+        // beyond 65,535. Safe cast to uint16_t at each use since WordList::load
+        // rejects lists larger than UINT16_MAX.
+        for (std::size_t gi = 0; gi < n; ++gi) {
+            const auto gi16 = static_cast<uint16_t>(gi);
+            if (std::ranges::binary_search(candidates, gi16)) continue; // already tried
 
-            int w = eval_guess(gi, best_worst);
-            if (w == std::numeric_limits<int>::max()) continue;
+            int w = eval_guess(gi16, best_worst);
+            if (w == DEPTH_IMPOSSIBLE) continue;
 
             bool better = w < best_worst ||
-                          (w == best_worst && !best_is_candidate && gi < best_gi);
+                          (w == best_worst && !best_is_candidate && gi16 < best_gi);
             if (better) {
                 best_worst        = w;
-                best_gi           = gi;
+                best_gi           = gi16;
                 best_is_candidate = false;
             }
             if (best_worst == 1) return {best_gi, 1};

@@ -1,7 +1,9 @@
 #include "wordlist.hpp"
 
 #include <algorithm>
+#include <format>
 #include <fstream>
+#include <limits>
 #include <numeric>
 #include <string>
 
@@ -31,6 +33,14 @@ std::expected<WordList, std::string> WordList::load(std::string_view path) {
 
     if (wl.words_.empty()) {
         return std::unexpected("word list is empty or contains no valid 5-letter words");
+    }
+
+    // Word indices are stored as uint16_t throughout the codebase. Reject lists
+    // that would overflow before they cause silent wrap-around bugs.
+    if (wl.words_.size() > std::numeric_limits<uint16_t>::max()) {
+        return std::unexpected(std::format(
+            "word list too large ({} words); maximum supported is {}",
+            wl.words_.size(), std::numeric_limits<uint16_t>::max()));
     }
 
     // Sort for binary-search index_of

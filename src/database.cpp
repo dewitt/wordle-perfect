@@ -47,12 +47,36 @@ uint64_t fnv1a_update(uint64_t h, const void* data, std::size_t len) noexcept {
 // Lifecycle
 // ---------------------------------------------------------------------------
 Database::~Database() {
-    if (db_) sqlite3_close(db_);
+    if (db_) {
+        if (stmt_next_node_) sqlite3_finalize(stmt_next_node_);
+        if (stmt_node_info_) sqlite3_finalize(stmt_node_info_);
+        sqlite3_close(db_);
+    }
 }
 
-Database::Database(Database&& o) noexcept : db_{o.db_} { o.db_ = nullptr; }
+Database::Database(Database&& o) noexcept
+    : db_{o.db_},
+      stmt_next_node_{o.stmt_next_node_},
+      stmt_node_info_{o.stmt_node_info_} {
+    o.db_ = nullptr;
+    o.stmt_next_node_ = nullptr;
+    o.stmt_node_info_ = nullptr;
+}
+
 Database& Database::operator=(Database&& o) noexcept {
-    if (this != &o) { if (db_) sqlite3_close(db_); db_ = o.db_; o.db_ = nullptr; }
+    if (this != &o) {
+        if (db_) {
+            if (stmt_next_node_) sqlite3_finalize(stmt_next_node_);
+            if (stmt_node_info_) sqlite3_finalize(stmt_node_info_);
+            sqlite3_close(db_);
+        }
+        db_              = o.db_;
+        stmt_next_node_  = o.stmt_next_node_;
+        stmt_node_info_  = o.stmt_node_info_;
+        o.db_             = nullptr;
+        o.stmt_next_node_ = nullptr;
+        o.stmt_node_info_ = nullptr;
+    }
     return *this;
 }
 
@@ -249,20 +273,25 @@ std::expected<uint32_t, std::string>
 Database::next_node(uint32_t node_id, Pattern pattern) const {
     if (pattern == PATTERN_SOLVED) return NULL_NODE;
 
-    StmtGuard st;
-    if (sqlite3_prepare_v2(db_,
-            "SELECT child FROM edges WHERE parent=? AND pattern=?",
-            -1, &st, nullptr) != SQLITE_OK)
-        return std::unexpected(db_errmsg(db_));
+    // Lazy-prepare and cache the statement; reset on reuse.
+    if (!stmt_next_node_) {
+        if (sqlite3_prepare_v2(db_,
+                "SELECT child FROM edges WHERE parent=? AND pattern=?",
+                -1, &stmt_next_node_, nullptr) != SQLITE_OK)
+            return std::unexpected(db_errmsg(db_));
+    } else {
+        sqlite3_reset(stmt_next_node_);
+        sqlite3_clear_bindings(stmt_next_node_);
+    }
 
-    sqlite3_bind_int(*st, 1, static_cast<int>(node_id));
-    sqlite3_bind_int(*st, 2, static_cast<int>(pattern));
+    sqlite3_bind_int(stmt_next_node_, 1, static_cast<int>(node_id));
+    sqlite3_bind_int(stmt_next_node_, 2, static_cast<int>(pattern));
 
-    if (sqlite3_step(*st) != SQLITE_ROW)
+    if (sqlite3_step(stmt_next_node_) != SQLITE_ROW)
         return std::unexpected(std::format(
             "no edge from node {} for pattern {}", node_id, pattern));
 
-    return static_cast<uint32_t>(sqlite3_column_int(*st, 0));
+    return static_cast<uint32_t>(sqlite3_column_int(stmt_next_node_, 0));
 }
 
 std::expected<uint16_t, std::string>
@@ -278,18 +307,23 @@ Database::next_word(uint32_t node_id, Pattern pattern) const {
 
 std::expected<std::pair<uint16_t, uint8_t>, std::string>
 Database::node_info(uint32_t node_id) const {
-    StmtGuard st;
-    if (sqlite3_prepare_v2(db_,
-            "SELECT word_idx, depth FROM nodes WHERE id=?",
-            -1, &st, nullptr) != SQLITE_OK)
-        return std::unexpected(db_errmsg(db_));
+    // Lazy-prepare and cache the statement; reset on reuse.
+    if (!stmt_node_info_) {
+        if (sqlite3_prepare_v2(db_,
+                "SELECT word_idx, depth FROM nodes WHERE id=?",
+                -1, &stmt_node_info_, nullptr) != SQLITE_OK)
+            return std::unexpected(db_errmsg(db_));
+    } else {
+        sqlite3_reset(stmt_node_info_);
+        sqlite3_clear_bindings(stmt_node_info_);
+    }
 
-    sqlite3_bind_int(*st, 1, static_cast<int>(node_id));
-    if (sqlite3_step(*st) != SQLITE_ROW)
+    sqlite3_bind_int(stmt_node_info_, 1, static_cast<int>(node_id));
+    if (sqlite3_step(stmt_node_info_) != SQLITE_ROW)
         return std::unexpected(std::format("node {} not found", node_id));
 
-    auto word_idx = static_cast<uint16_t>(sqlite3_column_int(*st, 0));
-    auto depth    = static_cast<uint8_t>(sqlite3_column_int(*st, 1));
+    auto word_idx = static_cast<uint16_t>(sqlite3_column_int(stmt_node_info_, 0));
+    auto depth    = static_cast<uint8_t>(sqlite3_column_int(stmt_node_info_, 1));
     return std::pair{word_idx, depth};
 }
 

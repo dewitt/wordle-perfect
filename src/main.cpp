@@ -58,10 +58,19 @@ static void mode_dump(const Database& db, const WordList& words) {
 // Mode: solve — show precomputed path for a known target word
 // ---------------------------------------------------------------------------
 static void mode_solve(const Database& db, const WordList& words,
-                       std::string_view target) {
-    auto idx = words.index_of(target);
-    if (idx == WordList::NPOS) {
-        std::println(stderr, "error: '{}' is not in the word list", target);
+                       const WordList& answers, std::string_view target) {
+    // Validate against the answers list first: the DB only has paths for
+    // answer words. A valid guess that isn't an answer will fail mid-traversal
+    // with a confusing "missing edge" error otherwise.
+    if (!answers.contains(target)) {
+        if (words.contains(target)) {
+            std::println(stderr,
+                "error: '{}' is a valid guess but not an answer word; "
+                "solve paths only exist for the {} answer words",
+                target, answers.size());
+        } else {
+            std::println(stderr, "error: '{}' is not in the word list", target);
+        }
         std::exit(1);
     }
 
@@ -278,8 +287,9 @@ static void mode_eval(const Database& db, const WordList& words,
 // main
 // ---------------------------------------------------------------------------
 int main(int argc, char** argv) {
-    std::string db_path = "wordle.db";
-    std::string words_path = "data/words.txt";
+    std::string db_path      = "wordle.db";
+    std::string words_path   = "data/words.txt";
+    std::string answers_path = "data/answers.txt";
 
     // Parse global flags
     std::vector<std::string_view> args{argv + 1, argv + argc};
@@ -294,12 +304,13 @@ int main(int argc, char** argv) {
         return {};
     };
 
-    if (auto v = consume("--db");    !v.empty()) db_path    = v;
-    if (auto v = consume("--words"); !v.empty()) words_path = v;
+    if (auto v = consume("--db");      !v.empty()) db_path      = v;
+    if (auto v = consume("--words");   !v.empty()) words_path   = v;
+    if (auto v = consume("--answers"); !v.empty()) answers_path = v;
 
     if (args.empty()) {
         std::println(stderr,
-            "usage: wordle [--db <path>] [--words <path>] <command> [args]\n"
+            "usage: wordle [--db <path>] [--words <path>] [--answers <path>] <command> [args]\n"
             "commands:\n"
             "  solve <word>   show precomputed path to <word>\n"
             "  play           interactive solver (you provide responses)\n"
@@ -311,10 +322,14 @@ int main(int argc, char** argv) {
 
     std::string_view cmd = args[0];
 
-    // Load word list
+    // Load word lists
     auto wl_res = WordList::load(words_path);
     if (!wl_res) die("loading word list: " + wl_res.error());
     const WordList& words = *wl_res;
+
+    auto ans_res = WordList::load(answers_path);
+    if (!ans_res) die("loading answers list: " + ans_res.error());
+    const WordList& answers = *ans_res;
 
     // All commands except future 'build' need the database
     if (cmd != "build") {
@@ -334,7 +349,7 @@ int main(int argc, char** argv) {
             mode_dump(db, words);
         } else if (cmd == "solve") {
             if (args.size() < 2) die("solve requires a target word");
-            mode_solve(db, words, args[1]);
+            mode_solve(db, words, answers, args[1]);
         } else if (cmd == "play") {
             mode_play(db, words);
         } else if (cmd == "eval") {

@@ -6,6 +6,7 @@
 #include <array>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <span>
 #include <vector>
 
@@ -90,13 +91,21 @@ public:
         std::span<const uint16_t> candidates,
         bool                      restrict_to_candidates = false) const;
 
+    // Sentinel returned as the depth component when no solution exists within
+    // budget, or when minimax finds no improvement over the greedy baseline.
+    // Callers distinguish the two cases by the returned word index: a valid
+    // index means minimax found a strictly better guess; NPOS means fall back
+    // to best_guess().
+    static constexpr int DEPTH_IMPOSSIBLE = std::numeric_limits<int>::max();
+
     // Minimax best guess: finds the guess that minimises worst-case depth
     // (number of additional guesses needed, including this one) over
     // `candidates`. Uses alpha-beta pruning seeded by the entropy guess.
     //
     // `depth_budget` is the maximum additional guesses allowed (including
-    // the current one). Returns {NPOS, INT_MAX} if no solution exists
-    // within budget.
+    // the current one). Returns {NPOS, DEPTH_IMPOSSIBLE} if no solution
+    // exists within budget, or {NPOS, seed_depth} if minimax found no
+    // improvement over greedy.
     //
     // Intended for small candidate sets (≤ MINIMAX_THRESHOLD) where the
     // O(N·K^depth) cost is acceptable. For larger sets, fall back to

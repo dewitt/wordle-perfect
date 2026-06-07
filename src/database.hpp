@@ -9,6 +9,7 @@
 #include <string_view>
 
 struct sqlite3;
+struct sqlite3_stmt;
 
 namespace wp {
 
@@ -102,6 +103,12 @@ private:
     [[nodiscard]] std::string                      compute_content_hash() const;
 
     sqlite3* db_{};
+
+    // Cached prepared statements for the hot-path lookup functions.
+    // Prepared lazily on first use; mutable so the cache works from const methods.
+    // Finalized in ~Database and nulled in move operations.
+    mutable sqlite3_stmt* stmt_next_node_{};
+    mutable sqlite3_stmt* stmt_node_info_{};
 };
 
 } // namespace wp
