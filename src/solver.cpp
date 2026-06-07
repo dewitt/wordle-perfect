@@ -328,11 +328,11 @@ EntropySolver::minimax_inner(std::span<const uint16_t> candidates,
 // ---------------------------------------------------------------------------
 // EntropySolver::solve
 // ---------------------------------------------------------------------------
-SolveResult EntropySolver::solve(uint16_t answer_idx) const {
+SolveResult EntropySolver::solve(uint16_t answer_idx, int max_rounds) const {
     SolveResult result;
     std::vector<uint16_t> candidates = words_.all_indices();
 
-    for (int round = 0; round < 6; ++round) {
+    for (int round = 0; round < max_rounds; ++round) {
         uint16_t guess_idx = best_guess(candidates);
         if (guess_idx == WordList::NPOS) break;
 

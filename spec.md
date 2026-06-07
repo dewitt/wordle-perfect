@@ -9,7 +9,7 @@
 ## Invariants
 
 ### batch_mode_evaluation
-Given a file containing one word per line (all valid answer words), the tool evaluates each word against the precomputed database and outputs per-word solve depths plus aggregate statistics: minimum depth, maximum depth, arithmetic mean depth, and a depth distribution showing the count of words solved at each depth level.
+Given an optional file containing one word per line, the tool evaluates each word against the precomputed database and outputs per-word solve depths plus aggregate statistics: minimum depth, maximum depth, arithmetic mean depth, and a depth distribution showing the count of words solved at each depth level. If no file is provided, the tool defaults to the curated answer word list for standard databases, or the full guess word list for full-coverage databases.
 
 ### completeness
 Every word in the valid answer word list must be reachable via the precomputed decision tree. The database must contain a path from the starting guess to every valid answer word.
@@ -36,7 +36,7 @@ Guess responses use a three-symbol alphabet: G (correct letter, correct position
 In solution mode, given a valid answer word, the tool outputs the complete precomputed path: the ordered sequence of (guess, response) pairs from the first guess through the guess that equals the answer, followed by summary statistics including the number of guesses required and the mean depth of the database overall.
 
 ### worst_case_depth
-No valid answer word requires more than 6 guesses to solve via the precomputed decision tree.
+The worst-case solve depth is recorded in the database metadata and governs the solve guarantee. For the standard curated-answer database, no valid answer word requires more than 6 guesses. For full-coverage databases (built with `--full`, covering all valid guess words), the worst-case depth may exceed 6; the value in metadata is authoritative. The CLI derives its round budget from this metadata field.
 
 ## Assumptions
 
@@ -104,7 +104,7 @@ The valid guess word list and valid answer word list are sourced from the NYT Wo
 
 **When** the user runs the tool in solution mode with W as the argument
 
-**Then** stdout contains the complete ordered sequence of guesses and responses leading to W, the final guess equals W, every response is a valid 5-symbol string over {G,Y,B}, and the sequence length is between 1 and 6 inclusive
+**Then** stdout contains the complete ordered sequence of guesses and responses leading to W, the final guess equals W, every response is a valid 5-symbol string over {G,Y,B}, and the sequence length is between 1 and N inclusive where N is the worst-case depth recorded in the database metadata
 
 ### solver_mode_correct_responses
 

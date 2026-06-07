@@ -349,11 +349,26 @@ int main(int argc, char** argv) {
         }
 
         // Read metadata once; derive runtime parameters from it
-        auto meta      = db.read_metadata();
-        const int  max_rounds     = (meta && meta->worst_case_depth > 0)
+        auto meta = db.read_metadata();
+        if (!meta) {
+            std::println(stderr, "warning: could not read database metadata: {}",
+                         meta.error());
+        }
+
+        // Sanity-check: if the runtime word list has a different size than what
+        // the DB was built with, word-index values will silently index wrong words.
+        if (meta && static_cast<int>(words.size()) != meta->total_words) {
+            std::println(stderr,
+                "error: word list has {} words but database was built with {}; "
+                "use the same words file that was used to build the database",
+                words.size(), meta->total_words);
+            return 1;
+        }
+
+        const int    max_rounds   = (meta && meta->worst_case_depth > 0)
                                   ? meta->worst_case_depth : 6;
-        const bool full_coverage  = meta && (meta->total_answers == meta->total_words);
-        const double mean_depth   = meta ? meta->mean_depth : 0.0;
+        const bool   full_coverage = meta && (meta->total_answers == meta->total_words);
+        const double mean_depth    = meta ? meta->mean_depth : 0.0;
 
         if (cmd == "info") {
             mode_info(db);

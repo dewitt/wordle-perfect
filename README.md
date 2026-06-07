@@ -6,16 +6,20 @@ The system hillclimbs toward the best-known solution tree — minimizing worst-c
 
 ## Current results
 
+Two precomputed databases are available. The standard DB is the default; the full-coverage DB is an optional fallback for resilience against future answer-list expansions.
+
+### Standard database (`wordle.db`) — 2,355 curated answers
+
 | Metric | Value |
 |--------|-------|
 | Start word | **tarse** (auto-selected) |
-| Words covered | 14,855 valid guesses / 2,355 answers |
-| Worst case | **6 guesses** (all 2,355 answers solved) |
+| Answers covered | 2,355 (all known NYT answer words) |
+| Worst case | **6 guesses** |
 | Mean depth | **3.8170 guesses** |
 | Database size | **455 KB** |
 | Per-query latency | ~5 ms (cold DB open); µs amortized |
 
-Distribution over 2,355 answer words:
+Distribution:
 
 ```
 2 guesses:    10
@@ -25,7 +29,19 @@ Distribution over 2,355 answer words:
 6 guesses:     6
 ```
 
-The 6 six-guess words (boxer, goody, joker, racer, rover, woozy) are provably unavoidable from the tarse opening given this word list — they form clusters that cannot be distinguished sooner.
+The 6 six-guess words (boxer, goody, joker, racer, rover, woozy) are provably unavoidable from the tarse opening — minimax confirms no guess sequence reduces them below 6.
+
+### Full-coverage database (`wordle-full.db`) — all 14,855 guess words
+
+| Metric | Value |
+|--------|-------|
+| Start word | **tares** (auto-selected) |
+| Words covered | 14,855 (every valid guess word) |
+| Worst case | **8 guesses** (27 words need 7, 1 needs 8) |
+| Mean depth | **4.1280 guesses** |
+| Failures | **0** (all 14,855 words solved) |
+
+The 28 previously-unsolvable words (coxed, waqfs, zills, etc.) are all obscure guess-list-only entries that have never been NYT answers.
 
 ## Build
 
@@ -39,8 +55,11 @@ nix develop        # or: direnv allow
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 
-# Precompute the decision tree (~30s)
+# Precompute the standard decision tree (~30s, 2,355 curated answers)
 ./build/build_db --output wordle.db
+
+# Precompute the full-coverage tree (~34s, all 14,855 guess words as answers)
+./build/build_db --full --output wordle-full.db
 ```
 
 ## Testing
@@ -70,7 +89,7 @@ Tests cover pattern computation (including duplicate-letter edge cases), word li
 # Interactive solver mode (tool guesses, you supply G/Y/B responses)
 ./build/wordle play
 
-# Evaluate all answer words and show statistics
+# Evaluate all answer words and show statistics (auto-selects target list from DB type)
 ./build/wordle eval
 
 # Show database metadata
@@ -88,7 +107,7 @@ All commands accept `--db <path>` (default: `wordle.db`), `--words <path>` (defa
 - **EntropySolver** — dynamic solver used during precomputation. At each node, picks the guess maximising weighted Shannon entropy over the remaining candidate set. Answer-list words are weighted 1000× to bias the tree toward better performance on likely answers.
 - **Minimax optimizer** — for candidate sets of ≤15 words, switches from greedy entropy to alpha-beta minimax to minimise worst-case depth rather than expected depth. Seeded by the greedy result for aggressive early pruning; sub-calls restrict search to the candidate pool to keep cost O(K^depth).
 - **build_db** — precomputation pipeline. Builds the full decision tree depth-first and writes it to SQLite in a single transaction. Root guess is found in parallel; all other nodes are single-threaded.
-- **Database** — SQLite with FNV-1a checksum verified on every open. Nodes, edges, and metadata in three tables. 16,516 nodes for the full word list. Hot-path lookup statements (`next_node`, `node_info`) are lazily prepared and cached for the lifetime of the connection.
+- **Database** — SQLite with FNV-1a checksum verified on every open. Nodes, edges, and metadata in three tables. 16,516 nodes (standard DB) / 16,543 nodes (full-coverage DB). Hot-path lookup statements (`next_node`, `node_info`) are lazily prepared and cached for the lifetime of the connection.
 - **wordle CLI** — thin layer over the database. Each solve step is one SQL lookup. Solution mode validates targets against the answers list and gives a helpful error for valid-guess-but-not-answer inputs.
 
 ## Spec

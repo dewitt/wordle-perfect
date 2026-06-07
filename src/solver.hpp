@@ -98,6 +98,10 @@ public:
     // to best_guess().
     static constexpr int DEPTH_IMPOSSIBLE = std::numeric_limits<int>::max();
 
+    // Default round budget for the dynamic solve() method. The standard Wordle
+    // game allows 6 guesses; full-coverage DBs may need up to 8.
+    static constexpr int DEFAULT_MAX_ROUNDS = 6;
+
     // Minimax best guess: finds the guess that minimises worst-case depth
     // (number of additional guesses needed, including this one) over
     // `candidates`. Uses alpha-beta pruning seeded by the entropy guess.
@@ -121,7 +125,9 @@ public:
 
     // Solve for a known target word, returning the full step sequence.
     // answer_idx must be a valid index into the WordList.
-    [[nodiscard]] SolveResult solve(uint16_t answer_idx) const;
+    // max_rounds caps the search; defaults to DEFAULT_MAX_ROUNDS (6).
+    [[nodiscard]] SolveResult solve(uint16_t answer_idx,
+                                    int max_rounds = DEFAULT_MAX_ROUNDS) const;
 
 private:
     // Compute weighted Shannon entropy.

@@ -223,7 +223,10 @@ struct EvalResult {
     int    worst;
     int    failures;   // words not solved (missing tree path)
     int    solved;
-    std::array<int, 16> dist{};  // dist[depth] = count; depth 0 unused
+    // dist[depth] = count; depth 0 unused.  Size 16 is the effective max-depth
+    // cap: words solved at depth ≥ 16 would appear as failures.  Current
+    // worst-case (full-coverage DB) is 8 — well within bounds.
+    std::array<int, 16> dist{};
 };
 
 static EvalResult
