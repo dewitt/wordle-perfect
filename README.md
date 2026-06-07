@@ -10,7 +10,7 @@ Early development. Specification complete; implementation not yet started.
 
 ## Spec
 
-See [spec.md](spec.md) for the full behavioral specification in dx format.
+See [spec.md](spec.md) for the full behavioral specification in [dx format](https://github.com/dewitt/dx).
 
 ## Modes
 

@@ -28,6 +28,10 @@ A Wordle solver that precomputes the best-known decision tree over all valid Wor
 - [ ] CLI tool (solution, solver, batch modes)
 - [ ] Database tooling (metadata sub-command, dump sub-command if binary)
 
+## Spec format
+
+`spec.md` uses the [dx specification format](https://github.com/dewitt/dx). dx specs are structured Markdown with five section types: Intent (goals), Invariants (non-negotiable observable properties), Assumptions (documented decisions), Contracts (Given/When/Then black-box tests), and Unconstrained (explicit implementation freedoms). Read the dx README before editing `spec.md`.
+
 ## Files
 
 | File | Purpose |
