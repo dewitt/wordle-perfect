@@ -17,7 +17,7 @@ A Wordle solver that precomputes the best-known decision tree over all valid Wor
 - **Tie-breaking**: Lexicographically first word wins when metrics are equal, for reproducibility.
 - **Consistency checking**: In solver mode, logically inconsistent user responses cause an immediate error exit.
 - **Response encoding**: G = correct position, Y = correct letter wrong position, B = absent. Case-insensitive.
-- **Language**: Unconstrained. Prefer speed. Apple Silicon M2 (SIMD/NEON/GCD) is the local target; remote/distributed compute is allowed for precomputation.
+- **Language**: C or C++ strongly preferred for SIMD/NEON access and memory control. See the style section below.
 
 ## Current state
 
@@ -49,6 +49,21 @@ A Wordle solver that precomputes the best-known decision tree over all valid Wor
 5. Evaluate the tree using the past-answers holdback set and report metrics.
 6. Hillclimb: try alternative start words, pruning strategies, or algorithms to improve worst-case then mean depth.
 7. Build the CLI on top of the final database.
+
+## Environment
+
+This project uses **Nix flakes** for hermetic, reproducible builds. The `flake.nix` declares all toolchains and dependencies. **direnv** (`.envrc`) activates the environment automatically on `cd`. Never install tools globally for this project — everything goes in the flake.
+
+## Language and style
+
+The user has a strong preference for **modern, idiomatic code**. If using C++:
+
+- Target **C++23** minimum; use **C++26** features where the toolchain supports them.
+- Use the modern standard library fully: ranges, `std::expected`, `std::mdspan`, `std::print`, `std::flat_map`, structured bindings, `if constexpr`, concepts, modules where practical.
+- Do **not** write C-with-classes style. Avoid raw pointers, manual memory management, `#define` constants, or pre-C++11 patterns unless there is a hard technical reason (e.g., a specific SIMD intrinsic).
+- Prefer expressive, readable code. Modern C++ should read cleanly — if it looks like C from 1999, rewrite it.
+
+This preference applies equally to any other language chosen: use the current idioms of that language, not its legacy subset.
 
 ## Conventions
 

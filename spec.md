@@ -40,6 +40,9 @@ No valid answer word requires more than 6 guesses to solve via the precomputed d
 
 ## Assumptions
 
+### build_environment
+The project uses Nix flakes for hermetic, reproducible builds, with direnv (`.envrc`) for automatic environment activation. All compiler toolchains, dependencies, and build tools are declared in `flake.nix`. This ensures precomputation runs and CLI builds are reproducible across machines and CI environments.
+
 ### database_format_default
 The database format is not mandated by this spec; the implementation may use SQLite, a flat binary file, or another format. SQLite is preferred for its built-in integrity tooling and inspectability; a proprietary binary format is acceptable if it materially reduces lookup latency or file size, provided the debug_dump_tool invariant is satisfied.
 
@@ -128,7 +131,7 @@ The choice of CLI framework, argument syntax, color output, progress indicators,
 The on-disk layout of the precomputed database is unconstrained, provided O(1) per-step lookup is achievable and, if the format is binary and proprietary, the debug_dump_tool invariant is satisfied.
 
 ### implementation_language
-Any programming language or combination of languages may be used. Implementations that exploit Apple Silicon M2 SIMD, NEON intrinsics, Grand Central Dispatch, or other hardware-level parallelism to reduce precomputation time are encouraged. Remote or distributed compute may be used for the precomputation phase.
+C or C++ is the preferred implementation language given the need for SIMD, NEON intrinsics, and low-level memory layout control on Apple Silicon M2. If C++ is used, the codebase targets C++23 at minimum (C++26 where toolchain support allows), making full use of modern standard library features, ranges, `std::expected`, `std::mdspan`, structured bindings, and other contemporary idioms — not legacy C-with-classes style. Remote or distributed compute may be used for the precomputation phase. Other languages are not excluded if they can satisfy the performance and hardware-access requirements.
 
 ### precomputation_strategy
 The algorithm used to build the decision tree — minimax, entropy minimization, Monte Carlo tree search, branch-and-bound, beam search, or any hybrid — is unconstrained. Multiple strategies may be run and compared; the database artifact with the best (worst-case depth, then mean depth) metrics is retained. If a strategy can be shown to produce a provably optimal tree, that finding should be noted in the database metadata, but proof of optimality is not required.
