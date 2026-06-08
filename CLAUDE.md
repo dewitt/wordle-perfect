@@ -33,13 +33,33 @@ A Wordle solver that precomputes the best-known decision tree over all valid Wor
 - [x] Test suite — Catch2 v3, 43 tests, `ctest` in ~3s (pattern, wordlist, solver, database)
 - [x] Code quality — `DEPTH_IMPOSSIBLE` constant, cached DB statements, uint16_t overflow guard, mode_solve answers validation, FNV hash correctness
 - [x] Full-coverage build mode — `build_db --full` builds `wordle-full.db` covering all 14,855 guess words (worst-case depth 8, 0 failures)
+- [x] Memoization experiment — `--memo-limit N` added to K=1 path; sweep confirmed 0% hit rate (no transpositions in a greedy tree); infra ready for beam search
+- [x] Beam search — `--beam-width K` builds trees via two-phase memoised beam search; K=10 achieves worst=5, mean=3.4293 (see `wordle-beam.db`)
 
-**Latest database results (answer-weighted-v2, start word: tarse):**
+**Standard database results (answer-weighted-v2, start word: tarse):**
 - Worst case: 6 guesses (all 2,355 answers solved)
 - Mean depth: 3.8170 guesses
 - Distribution: 0×1, 10×2, 680×3, 1402×4, 257×5, 6×6
 - Database: 16,516 nodes, 455 KB
 - Answers source: cfreshman/a03ef2cba789d8cf00c08f767e0fad7b (original embed) + 40 post-acquisition NYT additions from eithan/wordlelist
+
+**Beam-search database results (beam-search-v1-k10, start word: reast):**
+- Worst case: **5 guesses** (all 2,355 answers solved; no 6-guess words)
+- Mean depth: **3.4293 guesses** (vs static-wordle benchmark: worst=5, mean=3.606)
+- Distribution: 0×1, 70×2, 1245×3, 999×4, 41×5
+- Database: **2,507 nodes** (more compact — covers answer words only, not all 14,855 guess words)
+- Build time: ~142s, `./build/build_db --beam-width 10 --output wordle-beam.db`
+
+**Beam sweep summary (branch: memoization-experiment):**
+
+| K   | worst | mean   | nodes  | build  | cache hits |
+|-----|-------|--------|--------|--------|------------|
+| 1   | 6     | 3.8170 | 16,516 | 30s    | 0% (no transpositions at K=1) |
+| 2   | 6     | 3.4301 | 2,511  | 10.7s  | 13.8% (1 six-guess word) |
+| 3   | **5** | 3.4620 | 2,522  | 22.4s  | 26.0% |
+| 5   | 5     | 3.4616 | 2,521  | 48.9s  | 43.6% |
+| 10  | 5     | **3.4293** | 2,507 | 142s | 62.4% ← best |
+| 20  | 5     | 3.4301 | 2,507  | 399s   | 76.5% |
 
 **Hillclimbing findings:**
 - `tarse` is the auto-selected optimal start word (entropy over answer-weighted candidates)
@@ -49,11 +69,21 @@ A Wordle solver that precomputes the best-known decision tree over all valid Wor
 - Adding the 40 missing NYT post-acquisition answers improved cover and roger from 6→5 guesses (better cluster separation), added boxer as a new 6-guess case
 - Full-coverage DB (`wordle-full.db`, built with `--full`): start word `tares`, worst-case 8, mean 4.1280, 16,543 nodes; all 14,855 words solved; the 28 previously-unsolvable words now have paths (27 in 7 guesses, 1 in 8); none are in the curated answers set
 
+**Beam search key findings:**
+- K=1 greedy tree has NO transpositions (0% cache hit rate). Memoization provides no benefit for pure greedy trees.
+- Beam search creates abundant transpositions (13-76% hit rates) — memoization makes beam search practical (without it, cost would be K^depth).
+- Starting candidates must be ANSWER WORDS ONLY (not all 14,855). Using all words pollutes quality estimates and causes beam to pick bad root words.
+- Minimax for small candidate sets (≤15) within beam_eval is required. Without it, near-leaf quality estimates are wrong, corrupting beam choices at higher levels.
+- Mean depth must be ANSWER-WEIGHTED and must count GGGGG words (solved in 1 guess). Both bugs caused K=2 to initially perform worse than K=1.
+- Beam-search DB is compact (2,507 nodes for 2,355 answers) because it covers answer words only. Standard DB is larger (16,516 nodes) because it covers all 14,855 guess words.
+- DAG deduplication in build_from_eval is present but sees 0 reuses: the beam creates transpositions in its EVALUATION but the final chosen tree uses each candidate set exactly once.
+
 **Architecture summary:**
-- Solver picks greedy entropy guess at all nodes; switches to alpha-beta minimax for candidate sets ≤15
+- K=1 path: Solver picks greedy entropy guess at all nodes; switches to alpha-beta minimax for candidate sets ≤15
+- K>1 path (beam search): `beam_eval()` + `build_from_eval()` two-phase build; `top_k_guesses()` parallel entropy scan returns top-K; minimax used for small sets
 - Minimax is seeded by `greedy_worst_depth()` for a tight initial upper bound; sub-calls restrict to the candidate pool (O(K^depth) instead of O(N^depth))
 - `DEPTH_IMPOSSIBLE = std::numeric_limits<int>::max()` is the named sentinel for "budget exceeded" or "no improvement"; replaces all bare INT_MAX literals in the solver
-- All DB writes happen in a single SQLite transaction (~30s build, 455 KB for answers-only; ~34s, ~460 KB for full-coverage)
+- All DB writes happen in a single SQLite transaction (~30s build, 455 KB for K=1; ~142s, ~245 KB for K=10 beam)
 - CLI lookup: one SQL query per step, ~5ms cold / µs amortized; `next_node` and `node_info` statements are lazily prepared and cached for the connection lifetime
 - CLI derives `max_rounds` and `full_coverage` from DB metadata on open; word-list size is cross-checked against `total_words` in metadata to catch mismatched word files
 
