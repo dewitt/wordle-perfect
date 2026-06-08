@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
 #include <format>
 #include <future>
 #include <iostream>
@@ -65,6 +66,9 @@ struct TreeBuilder {
     unsigned               nthreads;
     EntropySolver::WeightFn weight_fn;  // may be null (uniform)
     uint16_t                fixed_root{WordList::NPOS};  // forced first guess, or NPOS
+    int                     target_depth{6};  // worst-case depth we try to hit
+    int                     min_escalation_depth{2};  // don't escalate above this
+    std::size_t             beam_width{EntropySolver::DEFAULT_BEAM_WIDTH};
 
     uint32_t next_id{0};
     uint64_t nodes_written{0};
@@ -72,9 +76,12 @@ struct TreeBuilder {
     uint64_t minimax_calls{0};
 
     TreeBuilder(const WordList& w, const PatternMatrix& p, Database& d, unsigned t,
-                EntropySolver::WeightFn wf = {}, uint16_t fixed_root = WordList::NPOS)
+                EntropySolver::WeightFn wf = {}, uint16_t fixed_root = WordList::NPOS,
+                int target_depth = 6, int min_escalation_depth = 2,
+                std::size_t beam_width = EntropySolver::DEFAULT_BEAM_WIDTH)
         : words{w}, pm{p}, db{d}, solver{w, p, wf}, nthreads{t}, weight_fn{wf},
-          fixed_root{fixed_root} {}
+          fixed_root{fixed_root}, target_depth{target_depth},
+          min_escalation_depth{min_escalation_depth}, beam_width{beam_width} {}
 
     // Entry point: build the entire tree wrapped in a single transaction.
     uint32_t build() {
@@ -103,23 +110,31 @@ private:
             guess_idx = fixed_root;   // forced start word
         } else if (depth == 1) {
             guess_idx = best_guess_parallel(candidates);  // parallelise expensive root
-        } else if (candidates.size() <= EntropySolver::MINIMAX_THRESHOLD) {
-            // Budget: worst-case Wordle is solvable in 6; remaining budget is
-            // 6 - (depth - 1) guesses from this node onward.
-            // Clamp to 1 so we never pass ≤0 to minimax.
-            const int budget = std::max(1, 7 - depth);
-            ++minimax_calls;
-            auto mm_t0 = Clock::now();
-            auto [gi, worst_depth] = solver.minimax_best_guess(candidates, budget);
-            double mm_e = elapsed_s(mm_t0);
-            if (mm_e > 0.01 || minimax_calls <= 5) {
-                std::println(stderr, "[mm #{} d={} c={} b={} t={:.3f}s]",
-                    minimax_calls, depth, candidates.size(), budget, mm_e);
-            }
-            (void)worst_depth;
-            guess_idx = (gi != WordList::NPOS) ? gi : solver.best_guess(candidates);
         } else {
-            guess_idx = solver.best_guess(candidates);
+            // Budget-aware selection. Remaining budget is target_depth - (depth-1)
+            // guesses from this node onward. Greedy is used unless it would blow
+            // the budget, in which case we escalate to minimax to break the
+            // repeated-letter trap clusters that leave depth-6 paths.
+            const int budget = std::max(1, target_depth + 1 - depth);
+            bool escalated = false;
+            auto mm_t0 = Clock::now();
+            if (depth < min_escalation_depth) {
+                // Too shallow to escalate (very large sets, costly probe with
+                // little payoff): take the plain greedy guess.
+                guess_idx = solver.best_guess(candidates);
+            } else {
+                guess_idx = solver.best_guess_within_budget(
+                    candidates, budget, &escalated,
+                    EntropySolver::ESCALATE_MAX_CANDIDATES, beam_width);
+            }
+            if (escalated) {
+                ++minimax_calls;
+                double mm_e = elapsed_s(mm_t0);
+                if (mm_e > 0.05 || minimax_calls <= 5) {
+                    std::println(stderr, "[mm #{} d={} c={} b={} t={:.3f}s]",
+                        minimax_calls, depth, candidates.size(), budget, mm_e);
+                }
+            }
         }
 
         // Insert node
@@ -306,11 +321,21 @@ int main(int argc, char** argv) {
         return true;
     }();
 
-    std::string strategy    = full_mode ? "full-coverage-v1" : "answer-weighted-v2";
+    std::string strategy    = full_mode ? "full-coverage-v2" : "answer-weighted-beam-v3";
     std::string start_word;                           // empty = let solver choose
     double      answer_weight = 1000.0;               // multiplier for answer words
     std::optional<std::string> answers_explicit;      // set if --answers was given
     std::string words_date_override;                  // --date override (ISO 8601)
+    // Worst-case depth the builder aims for. Default 6 (standard Wordle); the
+    // builder escalates to minimax only at nodes where greedy would exceed this.
+    // Full-coverage builds need a looser target since some obscure guess-only
+    // words are genuinely unreachable in 6.
+    int target_depth = full_mode ? 8 : 6;
+    // Minimum tree depth at which the budget-aware beam/minimax escalation runs.
+    // Escalating at depth 2 (very large candidate sets) is the dominant build
+    // cost; default to 3 where the trap clusters are already isolated.
+    int min_escalation_depth = 2;
+    std::size_t beam_width = EntropySolver::DEFAULT_BEAM_WIDTH;
 
     if (auto v = consume("--words");         !v.empty()) words_path           = v;
     if (auto v = consume("--answers");       !v.empty()) answers_explicit     = std::string(v);
@@ -318,6 +343,9 @@ int main(int argc, char** argv) {
     if (auto v = consume("--strategy");      !v.empty()) strategy             = v;
     if (auto v = consume("--start-word");    !v.empty()) start_word           = v;
     if (auto v = consume("--date");          !v.empty()) words_date_override  = v;
+    if (auto v = consume("--target-depth");  !v.empty()) target_depth = std::stoi(std::string(v));
+    if (auto v = consume("--min-escalation-depth"); !v.empty()) min_escalation_depth = std::stoi(std::string(v));
+    if (auto v = consume("--beam-width"); !v.empty()) beam_width = static_cast<std::size_t>(std::stoul(std::string(v)));
     if (auto v = consume("--answer-weight"); !v.empty()) answer_weight = std::stod(std::string(v));
 
     // Apply --full defaults: answers = all words, unless --answers was explicit
@@ -355,6 +383,15 @@ int main(int argc, char** argv) {
     // ── Database ──────────────────────────────────────────────────────────
     std::print("creating {}... ", out_path);
     std::cout.flush();
+    // Start from a clean slate: building over a populated DB would hit a UNIQUE
+    // constraint on nodes.id. Remove any prior artifact (and its WAL sidecars)
+    // so a rebuild to the same path always succeeds.
+    {
+        std::error_code ec;
+        std::filesystem::remove(out_path, ec);
+        std::filesystem::remove(out_path + "-wal", ec);
+        std::filesystem::remove(out_path + "-shm", ec);
+    }
     auto db = Database::create(out_path);
     if (!db) die(db.error());
     std::println("ok");
@@ -391,7 +428,8 @@ int main(int argc, char** argv) {
     std::println("building decision tree (strategy={}, {} threads)...", strategy, nthreads);
     t0 = Clock::now();
 
-    TreeBuilder builder{*wl, pm, *db, nthreads, weight_fn, fixed_root};
+    TreeBuilder builder{*wl, pm, *db, nthreads, weight_fn, fixed_root,
+                        target_depth, min_escalation_depth, beam_width};
     builder.build();
 
     std::println("tree built in {:.1f}s  ({} nodes, max depth {})",

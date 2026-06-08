@@ -123,6 +123,55 @@ public:
     minimax_best_guess(std::span<const uint16_t> candidates,
                        int depth_budget) const;
 
+    // Budget-aware guess selection (the precomputation work-horse).
+    //
+    // Strategy: take the fast greedy-entropy guess; if its worst-case depth
+    // already fits within `budget`, use it. Only when greedy would BLOW the
+    // budget do we escalate to the (expensive) minimax search for a guess that
+    // fits. This focuses minimax exactly on the hard nodes — the repeated-letter
+    // trap families that greedy leaves at depth 6 — regardless of candidate-set
+    // size, while keeping the common case fast.
+    //
+    // `budget` is the number of guesses allowed from this node onward
+    // (including the guess returned). Returns a valid word index always (falls
+    // back to the greedy guess if even minimax cannot fit the budget, i.e. the
+    // depth is genuinely unavoidable).
+    //
+    // `escalated` (optional out-param) is set to true when minimax was invoked,
+    // for build-time instrumentation.
+    //
+    // `escalate_max_candidates` bounds the candidate-set size at which we are
+    // willing to pay for minimax. Minimax's top-level iterates the entire ~15k
+    // guess vocabulary, so it is only tractable when the candidate set (and
+    // therefore the per-guess partition + restricted recursion) is small.
+    // Above this size we keep the greedy guess even if it misses budget.
+    static constexpr std::size_t ESCALATE_MAX_CANDIDATES = 64;
+    // Default beam width for the large-candidate-set escalation path.
+    static constexpr std::size_t DEFAULT_BEAM_WIDTH = 24;
+    [[nodiscard]] uint16_t
+    best_guess_within_budget(std::span<const uint16_t> candidates,
+                             int budget,
+                             bool* escalated = nullptr,
+                             std::size_t escalate_max_candidates =
+                                 ESCALATE_MAX_CANDIDATES,
+                             std::size_t beam_width = DEFAULT_BEAM_WIDTH) const;
+
+    // Beam re-search for large candidate sets where full minimax is intractable.
+    //
+    // When the greedy guess would blow the budget, evaluate the top-`beam_width`
+    // guesses (ranked by entropy) using the cheap greedy_worst_depth probe and
+    // return the one with the smallest worst-case depth. Unlike minimax, this
+    // does NOT iterate the full vocabulary — it only probes a fixed number of
+    // promising guesses — so it stays tractable even for large candidate sets,
+    // letting us attack the trap clusters created high in the tree.
+    //
+    // Returns {best_guess_idx, achieved_worst_depth}. Falls back to the greedy
+    // guess (and its depth) if no beam member improves on it.
+    [[nodiscard]] std::pair<uint16_t, int>
+    best_guess_beam(std::span<const uint16_t> candidates,
+                    int budget,
+                    std::size_t beam_width) const;
+
     // Solve for a known target word, returning the full step sequence.
     // answer_idx must be a valid index into the WordList.
     // max_rounds caps the search; defaults to DEFAULT_MAX_ROUNDS (6).
@@ -151,8 +200,14 @@ private:
     // Fast greedy worst-depth: follows entropy-greedy choices (no branching
     // over alternative guesses). Used to seed alpha-beta upper bound so that
     // minimax_inner prunes aggressively from the start.
-    [[nodiscard]] int greedy_worst_depth(std::span<const uint16_t> candidates,
-                                         int depth_budget) const noexcept;
+    //
+    // `upper_bound`: if the partial worst-depth reaches this value the function
+    // returns DEPTH_IMPOSSIBLE early (the result would not beat a known-better
+    // alternative). Pass DEPTH_IMPOSSIBLE to disable pruning.
+    [[nodiscard]] int greedy_worst_depth(
+        std::span<const uint16_t> candidates,
+        int depth_budget,
+        int upper_bound = DEPTH_IMPOSSIBLE) const noexcept;
 
     const WordList&      words_;
     const PatternMatrix& patterns_;

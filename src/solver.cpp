@@ -108,8 +108,11 @@ uint16_t EntropySolver::best_guess(std::span<const uint16_t> candidates,
         guess_pool = all_idx;
     }
 
-    double   best_H    = -1.0;
-    uint16_t best_word = candidates[0];  // fallback
+    double   best_H            = -1.0;
+    uint16_t best_word         = candidates[0];  // fallback
+    // Track best_word's candidacy as state instead of re-running binary_search
+    // on it every iteration (issue #15); only recomputed when best_word changes.
+    bool     best_is_candidate = std::ranges::binary_search(candidates, best_word);
 
     // Prefer guesses that are themselves still candidates (breaks ties toward
     // an answer rather than a pure information guess)
@@ -118,13 +121,13 @@ uint16_t EntropySolver::best_guess(std::span<const uint16_t> candidates,
 
         // Tie-break: prefer a candidate over a non-candidate for equal entropy
         bool gi_is_candidate = std::ranges::binary_search(candidates, gi);
-        bool best_is_candidate = std::ranges::binary_search(candidates, best_word);
 
         if (H > best_H ||
             (H == best_H && gi_is_candidate && !best_is_candidate) ||
             (H == best_H && gi_is_candidate == best_is_candidate && gi < best_word)) {
-            best_H    = H;
-            best_word = gi;
+            best_H            = H;
+            best_word         = gi;
+            best_is_candidate = gi_is_candidate;
         }
     }
     return best_word;
@@ -143,10 +146,12 @@ uint16_t EntropySolver::best_guess(std::span<const uint16_t> candidates,
 // O(depth × candidates) per call. Used to warmstart minimax alpha-beta.
 // ---------------------------------------------------------------------------
 int EntropySolver::greedy_worst_depth(std::span<const uint16_t> candidates,
-                                      int depth_budget) const noexcept {
+                                      int depth_budget,
+                                      int upper_bound) const noexcept {
     if (candidates.empty()) return 0;
     if (candidates.size() == 1) return 1;
     if (depth_budget <= 0)      return DEPTH_IMPOSSIBLE;
+    if (upper_bound <= 1)       return DEPTH_IMPOSSIBLE;  // can't beat it
 
     uint16_t guess   = best_guess(candidates);
     auto     buckets = partition(candidates, guess, patterns_);
@@ -154,9 +159,12 @@ int EntropySolver::greedy_worst_depth(std::span<const uint16_t> candidates,
     int worst = 0;
     for (Pattern p = 0; p < PATTERN_COUNT - 1; ++p) {
         if (buckets[p].empty()) continue;
-        int d = greedy_worst_depth(buckets[p], depth_budget - 1);
+        // Child only needs to be probed up to (upper_bound - 1): if its depth
+        // would make 1 + d reach upper_bound, this guess is already no better.
+        int d = greedy_worst_depth(buckets[p], depth_budget - 1, upper_bound - 1);
         if (d == DEPTH_IMPOSSIBLE) return d;
         worst = std::max(worst, 1 + d);
+        if (worst >= upper_bound) return DEPTH_IMPOSSIBLE;  // prune
     }
     return worst;
 }
@@ -185,6 +193,125 @@ EntropySolver::minimax_best_guess(std::span<const uint16_t> candidates,
     // Search for strictly better than greedy. If nothing improves, the caller
     // falls back to the entropy guess via the NPOS check in build_db.
     return minimax_inner(candidates, depth_budget, seed_depth);
+}
+
+// ---------------------------------------------------------------------------
+// EntropySolver::best_guess_within_budget
+//
+// Greedy-first, escalate-on-budget-miss. See header for the rationale.
+// ---------------------------------------------------------------------------
+uint16_t
+EntropySolver::best_guess_within_budget(std::span<const uint16_t> candidates,
+                                        int budget,
+                                        bool* escalated,
+                                        std::size_t escalate_max_candidates,
+                                        std::size_t beam_width) const {
+    if (escalated) *escalated = false;
+    if (candidates.empty()) return WordList::NPOS;
+    if (candidates.size() == 1) return candidates[0];
+    if (candidates.size() == 2) return candidates[0];
+
+    const uint16_t greedy = best_guess(candidates);
+
+    // Cheap pre-check: how deep does the greedy choice push the worst case? If
+    // it already fits the budget we're done. This probe calls best_guess at
+    // each level (O(N·K)), so for very large sets we lean on the beam path's
+    // own pruning instead of probing first.
+    const int greedy_depth = greedy_worst_depth(candidates, budget);
+    if (greedy_depth != DEPTH_IMPOSSIBLE && greedy_depth <= budget)
+        return greedy;
+
+    // Greedy blows the budget. Escalate.
+    if (escalated) *escalated = true;
+
+    if (candidates.size() <= escalate_max_candidates) {
+        // Small set: full minimax can find the provably-shallowest guess.
+        auto [mm_gi, mm_depth] = minimax_best_guess(candidates, budget);
+        if (mm_gi != WordList::NPOS && mm_depth <= budget)
+            return mm_gi;
+        return greedy;  // unavoidable at this depth
+    }
+
+    // Large set: full minimax is intractable (its top level iterates the whole
+    // vocabulary). Use the beam re-search — probe the top entropy guesses with
+    // the cheap greedy worst-depth evaluator. This is what lets us attack the
+    // repeated-letter trap clusters created high in the tree (issue #8).
+    auto [beam_gi, beam_depth] = best_guess_beam(candidates, budget, beam_width);
+    if (beam_gi != WordList::NPOS && beam_depth < greedy_depth)
+        return beam_gi;   // beam improved on greedy
+    return greedy;
+}
+
+// ---------------------------------------------------------------------------
+// EntropySolver::best_guess_beam
+//
+// Rank all guesses by entropy, take the top `beam_width`, and pick the one
+// whose greedy continuation has the smallest worst-case depth. Tractable for
+// large candidate sets because only `beam_width` greedy probes are run.
+// ---------------------------------------------------------------------------
+std::pair<uint16_t, int>
+EntropySolver::best_guess_beam(std::span<const uint16_t> candidates,
+                               int budget,
+                               std::size_t beam_width) const {
+    if (candidates.empty()) return {WordList::NPOS, 0};
+    if (candidates.size() == 1) return {candidates[0], 1};
+    if (candidates.size() == 2) return {candidates[0], 2};
+
+    // Rank every guess in the vocabulary by entropy over the candidate set.
+    const std::size_t n = words_.size();
+    std::vector<std::pair<double, uint16_t>> scored;
+    scored.reserve(n);
+    for (std::size_t gi = 0; gi < n; ++gi) {
+        const auto gi16 = static_cast<uint16_t>(gi);
+        scored.emplace_back(entropy(candidates, gi16, patterns_), gi16);
+    }
+
+    const std::size_t k = std::min(beam_width, scored.size());
+    // Partial sort: highest entropy first; tie-break lexicographically (lower
+    // index) to preserve reproducibility (spec tie_breaking_for_equal_paths).
+    std::ranges::partial_sort(
+        scored, scored.begin() + static_cast<std::ptrdiff_t>(k),
+        [](const auto& a, const auto& b) {
+            if (a.first != b.first) return a.first > b.first;
+            return a.second < b.second;
+        });
+
+    // Probe each beam member's greedy worst-case depth; keep the shallowest.
+    // Seed with the plain greedy guess so we never regress.
+    const uint16_t greedy = best_guess(candidates);
+    int      best_depth = greedy_worst_depth(candidates, budget);
+    uint16_t best_gi    = greedy;
+
+    for (std::size_t i = 0; i < k; ++i) {
+        const uint16_t gi = scored[i].second;
+        auto buckets = partition(candidates, gi, patterns_);
+
+        int worst = 0;
+        bool feasible = true;
+        // Each child only needs probing deep enough to (possibly) beat the
+        // current best: cap the child's worst-depth at best_depth - 1.
+        const int child_cap = (best_depth == DEPTH_IMPOSSIBLE)
+                            ? budget : best_depth - 1;
+        for (Pattern p = 0; p < PATTERN_COUNT - 1; ++p) {
+            if (buckets[p].empty()) continue;
+            int d = greedy_worst_depth(buckets[p], budget - 1, child_cap);
+            if (d == DEPTH_IMPOSSIBLE) { feasible = false; break; }
+            worst = std::max(worst, 1 + d);
+            if (best_depth != DEPTH_IMPOSSIBLE && worst >= best_depth) {
+                feasible = false;  // can't beat current best; prune
+                break;
+            }
+        }
+        if (!feasible) continue;
+
+        if (best_depth == DEPTH_IMPOSSIBLE || worst < best_depth ||
+            (worst == best_depth && gi < best_gi)) {
+            best_depth = worst;
+            best_gi    = gi;
+        }
+    }
+
+    return {best_gi, best_depth};
 }
 
 // Recursive minimax: returns {best_guess_idx, worst_depth} where worst_depth

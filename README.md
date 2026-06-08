@@ -15,21 +15,26 @@ Two precomputed databases are available. The standard DB is the default; the ful
 | Start word | **tarse** (auto-selected) |
 | Answers covered | 2,355 (all known NYT answer words) |
 | Worst case | **6 guesses** |
-| Mean depth | **3.8170 guesses** |
-| Database size | **455 KB** |
+| Mean depth | **3.8144 guesses** |
+| Strategy | `answer-weighted-beam-v3` |
 | Per-query latency | ~5 ms (cold DB open); µs amortized |
 
 Distribution:
 
 ```
-2 guesses:    10
-3 guesses:   680
-4 guesses:  1402
-5 guesses:   257
-6 guesses:     6
+2 guesses:    11
+3 guesses:   672
+4 guesses:  1420
+5 guesses:   247
+6 guesses:     5
 ```
 
-The 6 six-guess words (boxer, goody, joker, racer, rover, woozy) are provably unavoidable from the tarse opening — minimax confirms no guess sequence reduces them below 6.
+The 5 six-guess words (boxer, bunny, fuzzy, joker, rover) are the residue left
+after the budget-aware beam re-search (see Architecture). They are not claimed
+to be globally unavoidable — only that, from the auto-selected `tarse` opening,
+the greedy + beam optimizer finds no shorter path within practical compute. A
+worst-case-5 tree for the answer set is known to exist under exhaustive
+depth-first minimax, which is future work (see issue #8).
 
 ### Full-coverage database (`wordle-full.db`) — all 14,855 guess words
 
@@ -55,17 +60,17 @@ nix develop        # or: direnv allow
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 
-# Precompute the standard decision tree (~30s, 2,355 curated answers)
+# Precompute the standard decision tree (~2 min, 2,355 curated answers)
 ./build/build_db --output wordle.db
 
-# Precompute the full-coverage tree (~34s, all 14,855 guess words as answers)
+# Precompute the full-coverage tree (~1 min, all 14,855 guess words as answers)
 ./build/build_db --full --output wordle-full.db
 ```
 
 ## Testing
 
 ```sh
-# Run the full test suite (43 tests, ~3s)
+# Run the full test suite (48 tests, ~4s)
 ctest --test-dir build --output-on-failure
 
 # Or run the test binary directly for more verbose output
@@ -105,9 +110,11 @@ All commands accept `--db <path>` (default: `wordle.db`), `--words <path>` (defa
 
 - **Pattern matrix** — precomputed N×N table of Wordle response patterns (220M entries, ~210 MB in memory, built in ~0.5s using all CPU cores). Allows all partition and entropy computations to be pure memory accesses.
 - **EntropySolver** — dynamic solver used during precomputation. At each node, picks the guess maximising weighted Shannon entropy over the remaining candidate set. Answer-list words are weighted 1000× to bias the tree toward better performance on likely answers.
-- **Minimax optimizer** — for candidate sets of ≤15 words, switches from greedy entropy to alpha-beta minimax to minimise worst-case depth rather than expected depth. Seeded by the greedy result for aggressive early pruning; sub-calls restrict search to the candidate pool to keep cost O(K^depth).
-- **build_db** — precomputation pipeline. Builds the full decision tree depth-first and writes it to SQLite in a single transaction. Root guess is found in parallel; all other nodes are single-threaded.
-- **Database** — SQLite with FNV-1a checksum verified on every open. Nodes, edges, and metadata in three tables. 16,516 nodes (standard DB) / 16,543 nodes (full-coverage DB). Hot-path lookup statements (`next_node`, `node_info`) are lazily prepared and cached for the lifetime of the connection.
+- **Budget-aware escalation** — the build work-horse (`best_guess_within_budget`). It takes the fast greedy guess unless that guess's worst-case continuation would exceed the remaining depth budget. Only then does it escalate:
+  - **small candidate sets (≤ 64):** full alpha-beta **minimax**, seeded by the greedy worst-depth for tight pruning, sub-calls restricted to the candidate pool (O(K^depth)).
+  - **large candidate sets:** a **beam re-search** that probes the top-24 entropy guesses with a pruned greedy worst-depth evaluator. Unlike minimax this never iterates the whole vocabulary, so it stays tractable and can attack the repeated-letter trap clusters that form high in the tree. This is what reduced the depth-6 residue from 6 words to 5 and improved the mean.
+- **build_db** — precomputation pipeline. Builds the full decision tree depth-first and writes it to SQLite in a single transaction. Root guess is found in parallel; all other nodes are single-threaded. Tunable via `--target-depth`, `--min-escalation-depth`, `--beam-width`, `--start-word`, `--answer-weight`, and `--date`.
+- **Database** — SQLite with FNV-1a checksum verified on every open. Nodes, edges, and metadata in three tables. ~16,521 nodes (standard DB) / ~16,543 nodes (full-coverage DB). Hot-path lookup statements (`next_node`, `node_info`) are lazily prepared and cached for the lifetime of the connection.
 - **wordle CLI** — thin layer over the database. Each solve step is one SQL lookup. Solution mode validates targets against the answers list and gives a helpful error for valid-guess-but-not-answer inputs.
 
 ## Spec

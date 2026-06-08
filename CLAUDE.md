@@ -25,43 +25,51 @@ A Wordle solver that precomputes the best-known decision tree over all valid Wor
 - [x] Word list acquisition (`data/words.txt` 14,855 words; `data/answers.txt` 2,355 words)
 - [x] Pattern matrix precomputation (220M entries, ~210 MB, built in 0.5s on M2)
 - [x] Dynamic solver — answer-weighted entropy-greedy (`EntropySolver`, `solver.cpp`)
-- [x] Minimax optimizer — alpha-beta for candidate sets ≤15; seeded by greedy for pruning
-- [x] Precomputation pipeline — `build_db` tool; builds SQLite decision tree (~30s)
+- [x] Minimax optimizer — alpha-beta for small candidate sets (≤64); seeded by greedy for pruning
+- [x] Beam re-search — top-N entropy probe for large candidate sets where minimax is intractable (`best_guess_beam`)
+- [x] Budget-aware escalation — `best_guess_within_budget`: greedy unless it blows the depth budget, then minimax (small) or beam (large)
+- [x] Precomputation pipeline — `build_db` tool; builds SQLite decision tree (~2 min standard, ~1 min full)
 - [x] CLI tool — `wordle` binary; `solve`, `play`, `eval`, `info`, `dump` modes
 - [x] Database integrity — FNV-1a checksum on every open
-- [x] Hillclimbing — answer-weighted entropy (1000×), minimax, alternative start words
-- [x] Test suite — Catch2 v3, 43 tests, `ctest` in ~3s (pattern, wordlist, solver, database)
-- [x] Code quality — `DEPTH_IMPOSSIBLE` constant, cached DB statements, uint16_t overflow guard, mode_solve answers validation, FNV hash correctness
+- [x] Hillclimbing — answer-weighted entropy (1000×), minimax, beam, alternative start words
+- [x] Test suite — Catch2 v3, 48 tests, `ctest` in ~4s (pattern, wordlist, solver incl. minimax, database incl. walk_target + real-corruption)
+- [x] Code quality — `DEPTH_IMPOSSIBLE` constant, cached DB statements, uint16_t overflow guard, shared `walk_target`, mtime-derived words_date, mode_solve answers validation, FNV hash correctness
 - [x] Full-coverage build mode — `build_db --full` builds `wordle-full.db` covering all 14,855 guess words (worst-case depth 8, 0 failures)
 
-**Latest database results (answer-weighted-v2, start word: tarse):**
+**Latest database results (answer-weighted-beam-v3, start word: tarse):**
 - Worst case: 6 guesses (all 2,355 answers solved)
-- Mean depth: 3.8170 guesses
-- Distribution: 0×1, 10×2, 680×3, 1402×4, 257×5, 6×6
-- Database: 16,516 nodes, 455 KB
+- Mean depth: 3.8144 guesses
+- Distribution: 0×1, 11×2, 672×3, 1420×4, 247×5, 5×6
+- Database: 16,521 nodes, ~460 KB
 - Answers source: cfreshman/a03ef2cba789d8cf00c08f767e0fad7b (original embed) + 40 post-acquisition NYT additions from eithan/wordlelist
 
 **Hillclimbing findings:**
 - `tarse` is the auto-selected optimal start word (entropy over answer-weighted candidates)
 - Answer weight 1000× is optimal; higher weights (10000×, 100000×) slightly increase 6-guess count
 - Common human-chosen starts are all worse: slate(11×6), crane(12×6), crate(16×6), audio(26×6)
-- The 6 remaining six-guess words (boxer, goody, joker, racer, rover, woozy) are **provably unavoidable** from tarse — minimax confirms no reachable guess sequence reduces them below 6
-- Adding the 40 missing NYT post-acquisition answers improved cover and roger from 6→5 guesses (better cluster separation), added boxer as a new 6-guess case
-- Full-coverage DB (`wordle-full.db`, built with `--full`): start word `tares`, worst-case 8, mean 4.1280, 16,543 nodes; all 14,855 words solved; the 28 previously-unsolvable words now have paths (27 in 7 guesses, 1 in 8); none are in the curated answers set
+- The budget-aware beam re-search (depth ≥ 2, width 24) reduced the depth-6 residue from 6 words to 5 and improved mean 3.8170 → 3.8144. The remaining 5 (boxer, bunny, fuzzy, joker, rover) are **not** claimed globally unavoidable — only that greedy+beam from tarse finds no shorter path within practical compute. A worst-case-5 answer-set tree is known to exist under exhaustive minimax (future work, issue #8).
+- Escalating at depth 2 is the dominant build cost (≈2× build time) but is required for the 6→5 improvement; `--min-escalation-depth 3` reverts to the faster 6-word result. Wider beams (48) gave no further gain.
+- Forced strong openers under greedy+beam did NOT beat tarse for worst-case (e.g. salet/target-depth-5 → 9×6); reaching worst=5 needs true depth-first minimax, not greedy.
+- Full-coverage DB (`wordle-full.db`, built with `--full`): worst-case 8, mean 4.1280, 16,543 nodes; all 14,855 words solved (27 in 7 guesses, 1 in 8); none of the deep words are in the curated answers set.
 
 **Architecture summary:**
-- Solver picks greedy entropy guess at all nodes; switches to alpha-beta minimax for candidate sets ≤15
-- Minimax is seeded by `greedy_worst_depth()` for a tight initial upper bound; sub-calls restrict to the candidate pool (O(K^depth) instead of O(N^depth))
-- `DEPTH_IMPOSSIBLE = std::numeric_limits<int>::max()` is the named sentinel for "budget exceeded" or "no improvement"; replaces all bare INT_MAX literals in the solver
-- All DB writes happen in a single SQLite transaction (~30s build, 455 KB for answers-only; ~34s, ~460 KB for full-coverage)
-- CLI lookup: one SQL query per step, ~5ms cold / µs amortized; `next_node` and `node_info` statements are lazily prepared and cached for the connection lifetime
-- CLI derives `max_rounds` and `full_coverage` from DB metadata on open; word-list size is cross-checked against `total_words` in metadata to catch mismatched word files
+- Guess selection is driven by `EntropySolver::best_guess_within_budget`: take the greedy entropy guess, but if its greedy worst-case continuation would exceed the remaining depth budget, escalate.
+- Escalation: candidate sets ≤ `ESCALATE_MAX_CANDIDATES` (64) use full alpha-beta `minimax_best_guess`; larger sets use `best_guess_beam` (probe the top-`beam_width` entropy guesses with a pruned `greedy_worst_depth`).
+- Minimax/greedy probes are seeded/pruned by `greedy_worst_depth()` (now with an `upper_bound` alpha cutoff); sub-calls restrict to the candidate pool (O(K^depth) instead of O(N^depth)).
+- `DEPTH_IMPOSSIBLE = std::numeric_limits<int>::max()` is the named sentinel for "budget exceeded" or "no improvement".
+- `walk_target()` (database.cpp) is the single shared tree-walk used by both `build_db::evaluate` and the CLI `eval` mode, with a generous `WALK_DEPTH_CAP` so deep-but-valid paths report their true depth (not FAIL).
+- All DB writes happen in a single SQLite transaction (~2 min build standard, ~1 min full); `build_db` removes any prior artifact first so rebuilds to the same path succeed.
+- CLI lookup: one SQL query per step, ~5ms cold / µs amortized; `next_node` and `node_info` statements are lazily prepared and cached for the connection lifetime.
+- CLI derives `max_rounds` and `full_coverage` from DB metadata on open; word-list size is cross-checked against `total_words` in metadata to catch mismatched word files.
+- `words_date` is derived from the words-file mtime (or `--date`); no longer hardcoded.
 
 ## Known limitations
 
-- **`words_date` is hardcoded** in `build_db.cpp`. If the word lists are updated on a different date, update that string manually before rebuilding. A future improvement could derive it from the file mtime or a `--date` CLI flag.
-- **Consistency check in `mode_play` uses all 14,855 words**, not the curated 2,355 answers. For the standard DB, this means a logically inconsistent response is only flagged if *no word in the full guess list* satisfies all constraints — a slightly more permissive check than the spec implies. In practice this is rarely noticeable.
-- **`EvalResult::dist` is capped at depth 15** in `build_db.cpp`. Words solved at depth ≥ 16 would appear as failures. The current worst case (full-coverage DB) is 8, so this is not a practical concern.
+- **Consistency check in `mode_play` uses all 14,855 words**, not the curated 2,355 answers (issue #11). A logically inconsistent response is only flagged if *no word in the full guess list* satisfies all constraints — slightly more permissive than the spec implies.
+- **`EvalResult::dist` is capped at depth 15** in `build_db.cpp`. Words solved at depth ≥ 16 would appear as failures. The current worst case is 8, so this is not a practical concern. (The CLI `eval` mode now uses the shared `walk_target` with `WALK_DEPTH_CAP = 16` and reports true depths rather than capping at the DB's worst-case metric — issue #9, fixed.)
+- **Worst-case is 6, not 5** for the standard answer set. Greedy + beam from the auto-selected `tarse` opener cannot reach the known worst-case-5 tree; that needs exhaustive depth-first minimax over the answer set (issue #8, open).
+
+See the open GitHub issues (#8–#24) for the full backlog from the code review, including the SIMD/bitmask pattern path (#12) and a flat mmap'd binary DB format for true O(1) lookup (#13).
 
 ## Spec format
 
@@ -76,16 +84,16 @@ A Wordle solver that precomputes the best-known decision tree over all valid Wor
 | `CLAUDE.md` | This file |
 | `src/pattern.hpp/cpp` | Wordle pattern computation (G/Y/B encoding, 243 patterns) |
 | `src/wordlist.hpp/cpp` | Sorted word list with O(log N) lookup; rejects lists > 65,535 entries |
-| `src/solver.hpp/cpp` | `EntropySolver`: weighted entropy + minimax optimizer; `DEPTH_IMPOSSIBLE` sentinel |
-| `src/database.hpp/cpp` | SQLite-backed decision tree (read/write, checksum, metadata, cached hot-path stmts) |
-| `tools/build_db.cpp` | Precomputation pipeline; `--full` builds full-coverage DB (all guess words as answers) |
+| `src/solver.hpp/cpp` | `EntropySolver`: weighted entropy, minimax, beam re-search, `best_guess_within_budget`; `DEPTH_IMPOSSIBLE` sentinel |
+| `src/database.hpp/cpp` | SQLite decision tree + shared `walk_target` helper (read/write, checksum, metadata, cached hot-path stmts) |
+| `tools/build_db.cpp` | Precomputation pipeline; budget-aware escalation; flags incl. `--full`, `--target-depth`, `--min-escalation-depth`, `--beam-width`, `--date` |
 | `src/main.cpp` | CLI entry point (`solve`, `play`, `eval`, `info`, `dump`); validates solve targets vs answers list |
 | `data/words.txt` | 14,855 valid Wordle guesses (NYT, June 2026) |
 | `data/answers.txt` | 2,355 valid Wordle answers (NYT, June 2026; includes 40 post-acquisition additions) |
 | `tests/test_pattern.cpp` | Pattern computation tests (all-green, duplicates, encode/decode round-trips) |
 | `tests/test_wordlist.cpp` | WordList load, lookup, and edge case tests |
-| `tests/test_solver.cpp` | PatternMatrix, partition, best_guess, and end-to-end solve tests |
-| `tests/test_database.cpp` | Database CRUD, metadata round-trip, integrity checking, cached-statement tests |
+| `tests/test_solver.cpp` | PatternMatrix, partition, best_guess, minimax, and end-to-end solve tests |
+| `tests/test_database.cpp` | Database CRUD, metadata, integrity + real-corruption, `walk_target`, cached-statement tests |
 
 ## Available agents and tools
 
