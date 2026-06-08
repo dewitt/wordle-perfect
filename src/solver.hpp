@@ -91,6 +91,14 @@ public:
         std::span<const uint16_t> candidates,
         bool                      restrict_to_candidates = false) const;
 
+    // Parallel best_guess over the full vocabulary, splitting the guess pool
+    // across `nthreads` workers. Identical result and tie-breaking to
+    // best_guess(); used to parallelise the expensive root search. Shares the
+    // same entropy/tie-break logic so the two can't diverge.
+    [[nodiscard]] uint16_t best_guess_parallel(
+        std::span<const uint16_t> candidates,
+        unsigned                  nthreads) const;
+
     // Sentinel returned as the depth component when no solution exists within
     // budget, or when minimax finds no improvement over the greedy baseline.
     // Callers distinguish the two cases by the returned word index: a valid

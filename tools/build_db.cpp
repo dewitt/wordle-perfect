@@ -109,7 +109,8 @@ private:
         if (depth == 1 && fixed_root != WordList::NPOS) {
             guess_idx = fixed_root;   // forced start word
         } else if (depth == 1) {
-            guess_idx = best_guess_parallel(candidates);  // parallelise expensive root
+            // Parallelise the expensive root search (the O(N²) hot spot).
+            guess_idx = solver.best_guess_parallel(candidates, nthreads);
         } else {
             // Budget-aware selection. Remaining budget is target_depth - (depth-1)
             // guesses from this node onward. Greedy is used unless it would blow
@@ -158,92 +159,6 @@ private:
         }
 
         return my_id;
-    }
-
-    // Parallel best-guess search over all words (used only at root).
-    // Splits the guess pool across threads; each thread finds its local best,
-    // then we pick the global best.
-    uint16_t best_guess_parallel(std::span<const uint16_t> candidates) const {
-        const std::size_t total = words.size();
-        const auto chunk = (total + nthreads - 1) / nthreads;
-
-        struct LocalBest { double H; uint16_t idx; bool is_candidate; };
-
-        std::vector<std::future<LocalBest>> futures;
-        futures.reserve(nthreads);
-
-        for (unsigned t = 0; t < nthreads; ++t) {
-            const auto start = static_cast<uint16_t>(t * chunk);
-            const auto end   = static_cast<uint16_t>(
-                std::min(static_cast<std::size_t>(start) + chunk, total));
-            if (start >= total) break;
-
-            futures.push_back(std::async(std::launch::async,
-                [this, candidates, start, end]() -> LocalBest {
-                    double   best_H    = -1.0;
-                    uint16_t best_word = start;
-                    bool     best_is_cand = false;
-
-                    auto is_cand = [&](uint16_t gi) {
-                        return std::ranges::binary_search(candidates, gi);
-                    };
-                    auto w = [this](uint16_t ai) -> double {
-                        return weight_fn ? weight_fn(ai) : 1.0;
-                    };
-
-                    for (uint16_t gi = start; gi < end; ++gi) {
-                        // Weighted Shannon entropy
-                        std::array<double, PATTERN_COUNT> bw{};
-                        double total_w = 0.0;
-                        for (uint16_t ai : candidates) {
-                            double wi = w(ai);
-                            bw[pm.get(gi, ai)] += wi;
-                            total_w += wi;
-                        }
-                        double H = 0.0;
-                        if (total_w > 0.0) {
-                            for (double b : bw) {
-                                if (b > 0.0) {
-                                    double p = b / total_w;
-                                    H -= p * std::log2(p);
-                                }
-                            }
-                        }
-
-                        bool gi_is_cand = is_cand(gi);
-                        bool better =
-                            H > best_H ||
-                            (H == best_H && gi_is_cand && !best_is_cand) ||
-                            (H == best_H && gi_is_cand == best_is_cand && gi < best_word);
-
-                        if (better) {
-                            best_H       = H;
-                            best_word    = gi;
-                            best_is_cand = gi_is_cand;
-                        }
-                    }
-                    return {best_H, best_word, best_is_cand};
-                }));
-        }
-
-        // Merge local bests
-        double   global_H    = -1.0;
-        uint16_t global_word = 0;
-        bool     global_is_cand = false;
-
-        for (auto& f : futures) {
-            auto [H, idx, is_cand] = f.get();
-            bool better =
-                H > global_H ||
-                (H == global_H && is_cand && !global_is_cand) ||
-                (H == global_H && is_cand == global_is_cand && idx < global_word);
-            if (better) {
-                global_H       = H;
-                global_word    = idx;
-                global_is_cand = is_cand;
-            }
-        }
-        return global_word;
     }
 };
 

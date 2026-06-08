@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <future>
 #include <thread>
 #include <vector>
 
@@ -131,6 +132,73 @@ uint16_t EntropySolver::best_guess(std::span<const uint16_t> candidates,
         }
     }
     return best_word;
+}
+
+// ---------------------------------------------------------------------------
+// EntropySolver::best_guess_parallel
+//
+// Same result and tie-breaking as best_guess() over the full vocabulary, but
+// the guess pool is split across worker threads. Each worker finds its local
+// best (highest entropy; ties → candidate over non-candidate, then lower index)
+// and the merge applies the identical rule across workers.
+// ---------------------------------------------------------------------------
+uint16_t EntropySolver::best_guess_parallel(std::span<const uint16_t> candidates,
+                                            unsigned nthreads) const {
+    if (candidates.empty()) return WordList::NPOS;
+    if (candidates.size() == 1) return candidates[0];
+    if (candidates.size() == 2) return candidates[0];
+    if (nthreads == 0) nthreads = 1;
+
+    const std::size_t total = words_.size();
+    const auto chunk = (total + nthreads - 1) / nthreads;
+
+    struct LocalBest { double H; uint16_t idx; bool is_candidate; };
+
+    auto is_cand = [&](uint16_t gi) {
+        return std::ranges::binary_search(candidates, gi);
+    };
+    auto better = [](double H, uint16_t idx, bool is_c,
+                     double bH, uint16_t bIdx, bool bC) {
+        return H > bH ||
+               (H == bH && is_c && !bC) ||
+               (H == bH && is_c == bC && idx < bIdx);
+    };
+
+    std::vector<std::future<LocalBest>> futures;
+    futures.reserve(nthreads);
+
+    for (unsigned t = 0; t < nthreads; ++t) {
+        const auto start = static_cast<uint16_t>(t * chunk);
+        if (start >= total) break;
+        const auto end = static_cast<uint16_t>(
+            std::min(static_cast<std::size_t>(start) + chunk, total));
+
+        futures.push_back(std::async(std::launch::async,
+            [this, candidates, start, end, &is_cand, &better]() -> LocalBest {
+                double   best_H    = -1.0;
+                uint16_t best_word = start;
+                bool     best_is_c = false;
+                for (uint16_t gi = start; gi < end; ++gi) {
+                    double H = entropy(candidates, gi, patterns_);
+                    bool   c = is_cand(gi);
+                    if (better(H, gi, c, best_H, best_word, best_is_c)) {
+                        best_H = H; best_word = gi; best_is_c = c;
+                    }
+                }
+                return {best_H, best_word, best_is_c};
+            }));
+    }
+
+    double   global_H = -1.0;
+    uint16_t global_word = candidates[0];
+    bool     global_is_c = false;
+    for (auto& f : futures) {
+        auto [H, idx, c] = f.get();
+        if (better(H, idx, c, global_H, global_word, global_is_c)) {
+            global_H = H; global_word = idx; global_is_c = c;
+        }
+    }
+    return global_word;
 }
 
 // ---------------------------------------------------------------------------
