@@ -54,6 +54,14 @@ struct CandidateHash {
 };
 using MemoCache = std::unordered_map<std::vector<uint16_t>, uint16_t, CandidateHash>;
 
+// Result of a beam-search evaluation at a tree node: the best guess found
+// across the beam, and the resulting quality metrics for that choice.
+struct BeamEvalResult {
+    uint16_t best_guess;
+    int      worst_depth;  // worst over all candidates reachable from this node
+    double   mean_depth;   // mean solve depth over all candidates in this set
+};
+
 // ---------------------------------------------------------------------------
 // TreeBuilder — depth-first recursive, single-threaded DB writes, parallel
 // entropy evaluation at the top levels.
@@ -65,6 +73,16 @@ using MemoCache = std::unordered_map<std::vector<uint16_t>, uint16_t, CandidateH
 //   • All DB inserts are single-threaded (SQLite write serialisation).
 //   • At each node, the guess that maximises Shannon entropy is chosen.
 //     Ties go to lexicographically earlier words (via EntropySolver).
+//
+// Beam search (beam_width > 1):
+//   • Two-phase build: evaluate all reachable candidate sets using beam
+//     search (memoised), then write the DB using a DAG structure that
+//     deduplicates shared subtrees.
+//   • beam_eval() fills beam_cache with the best guess for every candidate
+//     set encountered by the beam.  Memoisation ensures each unique set is
+//     evaluated exactly once even when the beam creates transpositions.
+//   • build_from_eval() writes the DB using dag_nodes to skip re-inserting
+//     subtrees whose candidate set has already been built.
 // ---------------------------------------------------------------------------
 struct TreeBuilder {
     const WordList&        words;
@@ -80,25 +98,79 @@ struct TreeBuilder {
     int      max_depth_seen{0};
     uint64_t minimax_calls{0};
 
-    // Transposition memo cache — populated only for the entropy-greedy path.
-    std::size_t memo_limit{0};    // max candidate-set size to cache; 0 = disabled
+    // K=1 transposition memo cache (entropy-greedy path only).
+    std::size_t memo_limit{0};
     std::size_t cache_hits{0};
     std::size_t cache_misses{0};
     MemoCache   memo_cache;
 
+    // Beam search state (beam_width > 1 only).
+    std::size_t beam_width{1};
+    // beam_root_candidates: the initial candidate set for beam search.
+    // When non-empty, beam search evaluates sub-trees over this set rather
+    // than over all words.  Setting this to the curated answer list (2,355
+    // words) eliminates the 12,500 non-answer words that otherwise pollute
+    // quality estimates and cause the beam to make poor root-level decisions.
+    // The GUESS POOL (searched by top_k_guesses) is always all words.
+    std::vector<uint16_t> beam_root_candidates;
+    std::unordered_map<std::vector<uint16_t>, BeamEvalResult, CandidateHash> beam_cache;
+    std::unordered_map<std::vector<uint16_t>, uint32_t,       CandidateHash> dag_nodes;
+    std::size_t beam_cache_hits{0};
+    std::size_t beam_cache_misses{0};
+    std::size_t dag_reuses{0};
+
     TreeBuilder(const WordList& w, const PatternMatrix& p, Database& d, unsigned t,
                 EntropySolver::WeightFn wf = {}, uint16_t fixed_root = WordList::NPOS,
-                std::size_t memo_limit_ = 0)
+                std::size_t memo_limit_ = 0, std::size_t beam_width_ = 1)
         : words{w}, pm{p}, db{d}, solver{w, p, wf}, nthreads{t}, weight_fn{wf},
-          fixed_root{fixed_root}, memo_limit{memo_limit_} {}
+          fixed_root{fixed_root}, memo_limit{memo_limit_}, beam_width{beam_width_} {}
 
     // Entry point: build the entire tree wrapped in a single transaction.
     uint32_t build() {
-        // Wrapping in one transaction turns ~16k individual auto-commits into a
-        // single fsync — reduces build time by 100x–1000x on SQLite.
         if (auto r = db.begin_transaction(); !r) die(r.error());
         auto all_candidates = words.all_indices();
-        uint32_t root = build_node(all_candidates, 1);
+        uint32_t root;
+
+        if (beam_width > 1) {
+            // Phase 1: memoised beam-search evaluation.  Fills beam_cache with
+            // the best-guess word for every reachable candidate set.  Each unique
+            // set is evaluated exactly once regardless of how many paths the beam
+            // explores (memoisation converts the DAG of transpositions to a tree
+            // of unique evaluations).
+            //
+            // Use beam_root_candidates (typically the curated answer list) when
+            // set.  This keeps quality estimates clean: non-answer words have
+            // weight 1× but answer words have 1000×, so starting from only the
+            // 2,355 answer words gives the beam an unambiguous objective without
+            // noise from the 12,500 non-answer candidates.
+            const auto& beam_init = beam_root_candidates.empty()
+                                    ? all_candidates : beam_root_candidates;
+            std::print("  phase 1 (eval, beam={}, {} candidates)... ",
+                beam_width, beam_init.size());
+            std::cout.flush();
+            auto t1 = Clock::now();
+            beam_eval(beam_init);
+            const std::size_t total_evals = beam_cache_hits + beam_cache_misses;
+            std::println("done ({:.1f}s)  {} unique sets,  {} cache hits ({:.1f}%)",
+                elapsed_s(t1), beam_cache.size(), beam_cache_hits,
+                total_evals > 0
+                    ? 100.0 * static_cast<double>(beam_cache_hits) / static_cast<double>(total_evals)
+                    : 0.0);
+
+            // Phase 2: write DB using the cached decisions.  DAG deduplication
+            // reuses node IDs when the same candidate set is reached via multiple
+            // paths, keeping the DB compact.
+            std::print("  phase 2 (build, DAG)... ");
+            std::cout.flush();
+            auto t2 = Clock::now();
+            root = build_from_eval(beam_init, 1);
+            std::println("done ({:.1f}s)  {} unique nodes,  {} paths reused",
+                elapsed_s(t2), nodes_written, dag_reuses);
+        } else {
+            // K=1: original depth-first build (parallel root, minimax for small sets).
+            root = build_node(all_candidates, 1);
+        }
+
         if (auto r = db.commit_transaction(); !r) die(r.error());
         return root;
     }
@@ -260,6 +332,237 @@ private:
         }
         return global_word;
     }
+
+    // -----------------------------------------------------------------------
+    // top_k_guesses — return the K word indices with highest weighted entropy
+    // over `candidates`.  Parallelises the scan for large candidate sets.
+    // -----------------------------------------------------------------------
+    std::vector<uint16_t> top_k_guesses(std::span<const uint16_t> candidates,
+                                        std::size_t k) const {
+        struct Scored { double H; uint16_t idx; bool is_cand; };
+        const std::size_t total_words = words.size();
+        std::vector<Scored> all(total_words);
+
+        // Entropy computation: split guess pool across threads for large sets.
+        // For small candidate sets (≤ threshold) the inner loop is cheap enough
+        // that thread setup overhead dominates — use a single thread instead.
+        static constexpr std::size_t PARALLEL_THRESHOLD = 500;
+        const unsigned thr =
+            (candidates.size() >= PARALLEL_THRESHOLD && nthreads > 1) ? nthreads : 1u;
+        const auto chunk = (total_words + thr - 1) / thr;
+
+        auto compute_range = [&](std::size_t start, std::size_t end) {
+            for (std::size_t gi = start; gi < end; ++gi) {
+                const auto gi16 = static_cast<uint16_t>(gi);
+                std::array<double, PATTERN_COUNT> bw{};
+                double total_w = 0.0;
+                for (uint16_t ai : candidates) {
+                    const double wi = weight_fn ? weight_fn(ai) : 1.0;
+                    bw[pm.get(gi16, ai)] += wi;
+                    total_w += wi;
+                }
+                double H = 0.0;
+                if (total_w > 0.0) {
+                    for (double b : bw)
+                        if (b > 0.0) { const double p = b / total_w; H -= p * std::log2(p); }
+                }
+                all[gi] = {H, gi16, std::ranges::binary_search(candidates, gi16)};
+            }
+        };
+
+        if (thr > 1) {
+            std::vector<std::thread> threads;
+            threads.reserve(thr);
+            for (unsigned t = 0; t < thr; ++t) {
+                const auto start = t * chunk;
+                const auto end   = std::min(start + chunk, total_words);
+                if (start >= total_words) break;
+                threads.emplace_back(compute_range, start, end);
+            }
+            for (auto& th : threads) th.join();
+        } else {
+            compute_range(0, total_words);
+        }
+
+        // Partial sort: highest entropy first; candidates preferred; lex tie-break.
+        const std::size_t n = std::min(k, all.size());
+        std::ranges::partial_sort(all, all.begin() + static_cast<std::ptrdiff_t>(n),
+            [](const Scored& a, const Scored& b) {
+                if (a.H != b.H)            return a.H > b.H;
+                if (a.is_cand != b.is_cand) return a.is_cand;
+                return a.idx < b.idx;
+            });
+
+        std::vector<uint16_t> result;
+        result.reserve(n);
+        for (std::size_t i = 0; i < n; ++i) result.push_back(all[i].idx);
+        return result;
+    }
+
+    // -----------------------------------------------------------------------
+    // beam_eval — memoised recursive beam-search evaluation.
+    //
+    // For each candidate set, picks the guess that minimises
+    // (worst_depth, answer-weighted mean_depth) over the full subtree.
+    // Uses minimax for small sets (≤ MINIMAX_THRESHOLD) and beam search
+    // for larger sets.  Results are memoised by candidate set, so
+    // transpositions (same set reached via multiple beam paths) are
+    // evaluated exactly once.
+    //
+    // Mean depth is ANSWER-WEIGHTED (using weight_fn) to stay aligned with
+    // the entropy bias used by best_guess().  It also correctly counts
+    // GGGGG words (solved in 1 guess by this node's guess itself) which
+    // would otherwise be missed since we don't recurse into the GGGGG bucket.
+    // -----------------------------------------------------------------------
+    BeamEvalResult beam_eval(const std::vector<uint16_t>& candidates) {
+        if (candidates.empty()) return {WordList::NPOS, 0, 0.0};
+        if (candidates.size() == 1) return {candidates[0], 1, 1.0};
+
+        if (auto it = beam_cache.find(candidates); it != beam_cache.end()) {
+            ++beam_cache_hits;
+            return it->second;
+        }
+        ++beam_cache_misses;
+
+        // Compute quality metrics for a specific guess applied to this set.
+        // Returns {worst_depth, answer_weighted_mean_depth}.
+        //
+        // Correctly handles the GGGGG bucket (words solved in one guess, not
+        // recursed into) and uses weight_fn for the mean so the comparison
+        // objective matches the answer-weighted entropy ordering.
+        auto eval_guess = [&](uint16_t gi) -> std::pair<int, double> {
+            auto buckets = EntropySolver::partition(candidates, gi, pm);
+
+            int    worst     = 0;
+            double total_w_d = 0.0;
+            double total_w   = 0.0;
+
+            // GGGGG bucket: guess IS the answer → depth from this node = 1.
+            for (uint16_t ai : buckets[PATTERN_SOLVED]) {
+                const double w = weight_fn ? weight_fn(ai) : 1.0;
+                total_w   += w;
+                total_w_d += w * 1.0;
+            }
+
+            // Non-GGGGG buckets: depth = 1 (this guess) + sub-tree depth.
+            for (Pattern p = 0; p < PATTERN_COUNT - 1; ++p) {
+                const auto& bucket = buckets[p];
+                if (bucket.empty()) continue;
+
+                const auto sub = beam_eval(bucket);
+                if (sub.worst_depth == EntropySolver::DEPTH_IMPOSSIBLE)
+                    return {EntropySolver::DEPTH_IMPOSSIBLE, 1e18};
+
+                worst = std::max(worst, 1 + sub.worst_depth);
+
+                double bw = 0.0;
+                for (uint16_t ai : bucket) bw += (weight_fn ? weight_fn(ai) : 1.0);
+                total_w   += bw;
+                total_w_d += bw * (1.0 + sub.mean_depth);
+            }
+
+            return {worst, total_w > 0.0 ? total_w_d / total_w : 0.0};
+        };
+
+        // Update best with a new (guess, worst, mean) triple if it's better.
+        uint16_t best_gi    = WordList::NPOS;
+        int      best_worst = EntropySolver::DEPTH_IMPOSSIBLE;
+        double   best_mean  = 1e18;
+
+        auto update_best = [&](uint16_t gi, int worst, double mean) {
+            if (best_gi == WordList::NPOS) {
+                best_gi = gi; best_worst = worst; best_mean = mean; return;
+            }
+            const bool is_gi   = std::ranges::binary_search(candidates, gi);
+            const bool is_best = std::ranges::binary_search(candidates, best_gi);
+            const bool better  =
+                worst < best_worst ||
+                (worst == best_worst && mean < best_mean - 1e-9) ||
+                (worst == best_worst && std::abs(mean - best_mean) < 1e-9 &&
+                 is_gi && !is_best) ||
+                (worst == best_worst && std::abs(mean - best_mean) < 1e-9 &&
+                 is_gi == is_best && gi < best_gi);
+            if (better) { best_gi = gi; best_worst = worst; best_mean = mean; }
+        };
+
+        // Small sets: minimax finds the worst-case-optimal guess exhaustively.
+        // We still call eval_guess on its result so children enter beam_cache.
+        if (candidates.size() <= EntropySolver::MINIMAX_THRESHOLD) {
+            constexpr int MINIMAX_BUDGET = 10;
+            auto [gi_mm, wdepth] = solver.minimax_best_guess(candidates, MINIMAX_BUDGET);
+            (void)wdepth;
+            const uint16_t gi = (gi_mm != WordList::NPOS)
+                                 ? gi_mm : solver.best_guess(candidates);
+            auto [worst, mean] = eval_guess(gi);
+            return beam_cache[candidates] = {gi, worst, mean};
+        }
+
+        // Large sets: beam search over top-K entropy guesses.
+        for (uint16_t gi : top_k_guesses(candidates, beam_width)) {
+            auto [worst, mean] = eval_guess(gi);
+            if (worst != EntropySolver::DEPTH_IMPOSSIBLE)
+                update_best(gi, worst, mean);
+        }
+
+        if (best_gi == WordList::NPOS) {
+            // All beam guesses infeasible — shouldn't occur; fall back to
+            // entropy rank-1 to avoid returning a broken tree.
+            const auto fb = top_k_guesses(candidates, 1);
+            best_gi = fb.empty() ? candidates[0] : fb[0];
+        }
+
+        return beam_cache[candidates] = {best_gi, best_worst, best_mean};
+    }
+
+    // -----------------------------------------------------------------------
+    // build_from_eval — write DB nodes using beam_eval's cached decisions.
+    //
+    // DAG deduplication: if the same candidate set is reached via a second
+    // tree path, we return the already-inserted node_id instead of creating
+    // a duplicate subtree.  This keeps the DB compact even when beam search
+    // creates many transpositions.
+    // -----------------------------------------------------------------------
+    uint32_t build_from_eval(const std::vector<uint16_t>& candidates, int depth) {
+        if (auto it = dag_nodes.find(candidates); it != dag_nodes.end()) {
+            ++dag_reuses;
+            return it->second;
+        }
+
+        // Get best guess from eval cache.
+        const uint16_t guess_idx = [&]() -> uint16_t {
+            if (candidates.size() == 1) return candidates[0];
+            const auto it = beam_cache.find(candidates);
+            if (it == beam_cache.end())
+                die("build_from_eval: candidate set not in beam_cache");
+            return it->second.best_guess;
+        }();
+
+        if (guess_idx == WordList::NPOS)
+            die("build_from_eval: beam_eval returned NPOS for non-trivial set");
+
+        const uint32_t my_id = next_id++;
+        // Clamp depth to uint8_t range (depths > 255 are theoretically impossible
+        // for Wordle, but guard against it anyway).
+        const auto depth_u8 = static_cast<uint8_t>(
+            std::min(depth, static_cast<int>(std::numeric_limits<uint8_t>::max())));
+        if (auto r = db.insert_node(my_id, guess_idx, depth_u8); !r) die(r.error());
+        ++nodes_written;
+        if (depth > max_depth_seen) max_depth_seen = depth;
+
+        // Register before recursing so that any cycle (impossible in Wordle,
+        // but safe to handle) would resolve to the current node.
+        dag_nodes[candidates] = my_id;
+
+        auto buckets = EntropySolver::partition(candidates, guess_idx, pm);
+        for (Pattern p = 0; p < PATTERN_COUNT - 1; ++p) {
+            const auto& bucket = buckets[p];
+            if (bucket.empty()) continue;
+            uint32_t child_id = build_from_eval(bucket, depth + 1);
+            if (auto re = db.insert_edge(my_id, p, child_id); !re) die(re.error());
+        }
+
+        return my_id;
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -354,6 +657,7 @@ int main(int argc, char** argv) {
     std::string start_word;                           // empty = let solver choose
     double      answer_weight = 1000.0;               // multiplier for answer words
     std::size_t memo_limit    = 0;                    // 0 = memoization disabled
+    std::size_t beam_width    = 1;                    // 1 = existing greedy/minimax path
     std::optional<std::string> answers_explicit;      // set if --answers was given
 
     if (auto v = consume("--words");         !v.empty()) words_path           = v;
@@ -362,9 +666,15 @@ int main(int argc, char** argv) {
     if (auto v = consume("--strategy");      !v.empty()) strategy             = v;
     if (auto v = consume("--start-word");    !v.empty()) start_word           = v;
     if (auto v = consume("--answer-weight"); !v.empty()) answer_weight = std::stod(std::string(v));
-    // --memo-limit N: cache best_guess() for candidate sets of size ≤ N.
-    // Pass a large value (e.g. 99999) for effectively unbounded caching.
+    // --memo-limit N: cache best_guess() for candidate sets of size ≤ N (K=1 path only).
     if (auto v = consume("--memo-limit");    !v.empty()) memo_limit = static_cast<std::size_t>(std::stoull(std::string(v)));
+    // --beam-width K: try top-K entropy guesses at every node and keep the
+    // one that minimises worst-case depth.  K=1 uses the existing greedy path.
+    if (auto v = consume("--beam-width");    !v.empty()) beam_width = static_cast<std::size_t>(std::stoull(std::string(v)));
+
+    // Reflect beam search in the strategy tag if the user hasn't overridden it.
+    if (beam_width > 1 && strategy == (full_mode ? "full-coverage-v1" : "answer-weighted-v2"))
+        strategy = std::format("beam-search-v1-k{}", beam_width);
 
     // Apply --full defaults: answers = all words, unless --answers was explicit
     if (full_mode) answers_path = answers_explicit.value_or(words_path);
@@ -437,7 +747,16 @@ int main(int argc, char** argv) {
     std::println("building decision tree (strategy={}, {} threads)...", strategy, nthreads);
     t0 = Clock::now();
 
-    TreeBuilder builder{*wl, pm, *db, nthreads, weight_fn, fixed_root, memo_limit};
+    TreeBuilder builder{*wl, pm, *db, nthreads, weight_fn, fixed_root, memo_limit, beam_width};
+
+    // For beam search in standard mode (not full-coverage): evaluate sub-trees
+    // over answer words only.  This eliminates noise from non-answer candidates
+    // and aligns the beam's quality estimates with the evaluation objective.
+    const bool beam_standard_mode = (ans->size() != wl->size());
+    if (beam_width > 1 && beam_standard_mode) {
+        builder.beam_root_candidates = answer_indices;
+    }
+
     builder.build();
 
     std::println("tree built in {:.1f}s  ({} nodes, max depth {})",
