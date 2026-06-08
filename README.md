@@ -86,10 +86,9 @@ Tests cover pattern computation (including duplicate-letter edge cases), word li
 ./build/wordle solve thumb
 # solving: thumb
 #   1. tarse  [GBBBB ]
-#   2. pinch  [BBBBY ]
-#   3. abbot  [BYBBY ]
-#   4. thumb  [GGGGG ]
-# solved in 4 guesses  (db mean: 3.8170)
+#   2. yogin  [BBBBB ]
+#   3. thumb  [GGGGG ]
+# solved in 3 guesses  (db mean: 3.8144)
 
 # Interactive solver mode (tool guesses, you supply G/Y/B responses)
 ./build/wordle play
