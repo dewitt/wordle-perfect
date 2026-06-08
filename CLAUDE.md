@@ -33,7 +33,7 @@ A Wordle solver that precomputes the best-known decision tree over all valid Wor
 - [x] Database integrity — FNV-1a checksum on every open
 - [x] Binary DB format — flat mmap'd `.bin` (`src/binarydb.*`) for true O(1) lookup; `build_db` exports it alongside the SQLite file; CLI auto-detects format. ~42% smaller, ~2× faster, no runtime SQLite dep
 - [x] Hillclimbing — answer-weighted entropy (1000×), minimax, beam, alternative start words
-- [x] Test suite — Catch2 v3, 58 tests, `ctest` in ~4s (pattern, wordlist, solver incl. minimax + consistency, database incl. walk_target + real-corruption + e2e, binarydb incl. SQLite-parity)
+- [x] Test suite — Catch2 v3, 59 tests, `ctest` in ~4s (pattern, wordlist, solver incl. minimax + consistency, database incl. walk_target + real-corruption + e2e, binarydb incl. SQLite-parity + dump)
 - [x] Code quality — `DEPTH_IMPOSSIBLE` constant, cached DB statements, uint16_t overflow guard, shared `walk_target`, mtime-derived words_date, mode_solve answers validation, FNV hash correctness
 - [x] Full-coverage build mode — `build_db --full` builds `wordle-full.db` covering all 14,855 guess words (worst-case depth 8, 0 failures)
 

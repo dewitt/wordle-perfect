@@ -70,7 +70,7 @@ cmake --build build
 ## Testing
 
 ```sh
-# Run the full test suite (58 tests, ~4s)
+# Run the full test suite (59 tests, ~4s)
 ctest --test-dir build --output-on-failure
 
 # Or run the test binary directly for more verbose output
@@ -113,7 +113,7 @@ All commands accept `--db <path>` (default: `wordle.db`), `--words <path>` (defa
   - **small candidate sets (≤ 64):** full alpha-beta **minimax**, seeded by the greedy worst-depth for tight pruning, sub-calls restricted to the candidate pool (O(K^depth)).
   - **large candidate sets:** a **beam re-search** that probes the top-24 entropy guesses with a pruned greedy worst-depth evaluator. Unlike minimax this never iterates the whole vocabulary, so it stays tractable and can attack the repeated-letter trap clusters that form high in the tree. This is what reduced the depth-6 residue from 6 words to 5 and improved the mean.
  - **build_db** — precomputation pipeline. Builds the full decision tree depth-first and writes it to SQLite in a single transaction, then exports a flat binary alongside it (`<output>.bin`; disable with `--no-binary`). Root guess is found in parallel; all other nodes are single-threaded. Tunable via `--target-depth`, `--min-escalation-depth`, `--beam-width`, `--start-word`, `--answer-weight`, `--date`, and `--binary`.
-- **Database (SQLite)** — the build-time format. FNV-1a checksum verified on every open. Nodes, edges, and metadata in three tables. ~16,521 nodes (standard DB) / ~16,543 nodes (full-coverage DB). Hot-path lookup statements (`next_node`, `node_info`) are lazily prepared and cached for the connection lifetime.
+- **Database (SQLite)** — the build-time format. FNV-1a checksum verified on every open. Nodes, edges, and metadata in three tables. ~16,521 nodes (standard DB) / ~16,543 nodes (full-coverage DB). Finalized as a single self-contained file (`journal_mode=DELETE`, no `-wal`/`-shm` sidecars). Hot-path lookup statements (`next_node`, `node_info`) are lazily prepared, cached, and reset after each read.
 - **BinaryDb (flat mmap)** — the runtime format (`src/binarydb.*`). A single `mmap`-able file: fixed header (magic, version, counts, FNV-1a checksum, metadata) + a direct-indexed node array + a CSR-style edge array (per-node offset + pattern-sorted slice). `node_info` is a direct array index and `next_node` binary-searches a node's tiny edge slice — genuinely O(1), no SQLite dependency at runtime. ~42% smaller than the SQLite file and ~2× faster end-to-end. This is the format the `constant_time_lookup` invariant intends.
 - **wordle CLI** — thin layer over either backend (auto-detected by magic / `.bin` extension). Each solve step is one O(1) lookup. All commands — including `dump` — work against both formats. Solution mode validates targets against the answers list and gives a helpful error for valid-guess-but-not-answer inputs.
 
