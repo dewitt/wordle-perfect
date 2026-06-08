@@ -14,6 +14,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 using namespace wp;
@@ -27,6 +28,31 @@ using Clock = std::chrono::steady_clock;
 static double elapsed_s(Clock::time_point t0) {
     return std::chrono::duration<double>(Clock::now() - t0).count();
 }
+
+// ---------------------------------------------------------------------------
+// Transposition memoization
+//
+// Many decision-tree paths converge on the same candidate set (transpositions).
+// Caching best_guess() results for those sets avoids redundant O(N × |cands|)
+// entropy computations.  Only the entropy-greedy path is cached: minimax results
+// depend on depth_budget and are only applied to tiny sets (≤15), so caching
+// them is not worthwhile.
+//
+// Cache key: the sorted candidate vector (partition() preserves sort order).
+// Cache value: the best-guess word index for that candidate set.
+// Bounded by memo_limit: only sets of size ≤ memo_limit are cached.
+// Setting memo_limit to 0 disables caching entirely (the default).
+// ---------------------------------------------------------------------------
+struct CandidateHash {
+    std::size_t operator()(const std::vector<uint16_t>& v) const noexcept {
+        // FNV-1a-inspired mix over the sorted word-index vector.
+        std::size_t seed = v.size();
+        for (auto x : v)
+            seed ^= x + std::size_t{0x9e3779b9} + (seed << 6) + (seed >> 2);
+        return seed;
+    }
+};
+using MemoCache = std::unordered_map<std::vector<uint16_t>, uint16_t, CandidateHash>;
 
 // ---------------------------------------------------------------------------
 // TreeBuilder — depth-first recursive, single-threaded DB writes, parallel
@@ -54,10 +80,17 @@ struct TreeBuilder {
     int      max_depth_seen{0};
     uint64_t minimax_calls{0};
 
+    // Transposition memo cache — populated only for the entropy-greedy path.
+    std::size_t memo_limit{0};    // max candidate-set size to cache; 0 = disabled
+    std::size_t cache_hits{0};
+    std::size_t cache_misses{0};
+    MemoCache   memo_cache;
+
     TreeBuilder(const WordList& w, const PatternMatrix& p, Database& d, unsigned t,
-                EntropySolver::WeightFn wf = {}, uint16_t fixed_root = WordList::NPOS)
+                EntropySolver::WeightFn wf = {}, uint16_t fixed_root = WordList::NPOS,
+                std::size_t memo_limit_ = 0)
         : words{w}, pm{p}, db{d}, solver{w, p, wf}, nthreads{t}, weight_fn{wf},
-          fixed_root{fixed_root} {}
+          fixed_root{fixed_root}, memo_limit{memo_limit_} {}
 
     // Entry point: build the entire tree wrapped in a single transaction.
     uint32_t build() {
@@ -102,7 +135,21 @@ private:
             (void)worst_depth;
             guess_idx = (gi != WordList::NPOS) ? gi : solver.best_guess(candidates);
         } else {
-            guess_idx = solver.best_guess(candidates);
+            // Entropy-greedy path — check transposition memo cache.
+            // Cache is keyed on the sorted candidate vector; partition() preserves
+            // sort order so no extra sorting is needed here.
+            if (memo_limit > 0 && candidates.size() <= memo_limit) {
+                if (auto it = memo_cache.find(candidates); it != memo_cache.end()) {
+                    ++cache_hits;
+                    guess_idx = it->second;
+                } else {
+                    ++cache_misses;
+                    guess_idx = solver.best_guess(candidates);
+                    memo_cache.emplace(candidates, guess_idx);
+                }
+            } else {
+                guess_idx = solver.best_guess(candidates);
+            }
         }
 
         // Insert node
@@ -306,6 +353,7 @@ int main(int argc, char** argv) {
     std::string strategy    = full_mode ? "full-coverage-v1" : "answer-weighted-v2";
     std::string start_word;                           // empty = let solver choose
     double      answer_weight = 1000.0;               // multiplier for answer words
+    std::size_t memo_limit    = 0;                    // 0 = memoization disabled
     std::optional<std::string> answers_explicit;      // set if --answers was given
 
     if (auto v = consume("--words");         !v.empty()) words_path           = v;
@@ -314,6 +362,9 @@ int main(int argc, char** argv) {
     if (auto v = consume("--strategy");      !v.empty()) strategy             = v;
     if (auto v = consume("--start-word");    !v.empty()) start_word           = v;
     if (auto v = consume("--answer-weight"); !v.empty()) answer_weight = std::stod(std::string(v));
+    // --memo-limit N: cache best_guess() for candidate sets of size ≤ N.
+    // Pass a large value (e.g. 99999) for effectively unbounded caching.
+    if (auto v = consume("--memo-limit");    !v.empty()) memo_limit = static_cast<std::size_t>(std::stoull(std::string(v)));
 
     // Apply --full defaults: answers = all words, unless --answers was explicit
     if (full_mode) answers_path = answers_explicit.value_or(words_path);
@@ -386,11 +437,22 @@ int main(int argc, char** argv) {
     std::println("building decision tree (strategy={}, {} threads)...", strategy, nthreads);
     t0 = Clock::now();
 
-    TreeBuilder builder{*wl, pm, *db, nthreads, weight_fn, fixed_root};
+    TreeBuilder builder{*wl, pm, *db, nthreads, weight_fn, fixed_root, memo_limit};
     builder.build();
 
     std::println("tree built in {:.1f}s  ({} nodes, max depth {})",
         elapsed_s(t0), builder.nodes_written, builder.max_depth_seen);
+
+    // Report memo cache stats (only when caching was enabled).
+    if (memo_limit > 0) {
+        const auto total_lookups = builder.cache_hits + builder.cache_misses;
+        const double hit_rate = total_lookups > 0
+            ? 100.0 * static_cast<double>(builder.cache_hits) / static_cast<double>(total_lookups)
+            : 0.0;
+        std::println("memo cache: {} hits / {} lookups ({:.1f}%),  {} unique sets cached  (limit={})",
+            builder.cache_hits, total_lookups, hit_rate,
+            builder.memo_cache.size(), memo_limit);
+    }
 
     // ── Evaluate (no depth cap — real worst case) ─────────────────────────
     std::print("evaluating against {} answers... ", ans->size());
