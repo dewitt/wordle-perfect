@@ -483,11 +483,8 @@ void Database::dump(const WordList& words) const {
             auto parent  = sqlite3_column_int(*st, 0);
             auto pattern = static_cast<Pattern>(sqlite3_column_int(*st, 1));
             auto child   = sqlite3_column_int(*st, 2);
-            auto dec     = decode_pattern(pattern);
-            std::println("  {:6d} --[{}{}{}{}{} ]--> {:6d}",
-                parent,
-                dec[0], dec[1], dec[2], dec[3], dec[4],
-                child);
+            std::println("  {:6d} --[{}]--> {:6d}",
+                parent, format_pattern(pattern), child);
         }
     }
 }

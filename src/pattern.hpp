@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <string>
 #include <string_view>
 
 namespace wp {
@@ -27,13 +28,22 @@ inline constexpr int     PATTERN_COUNT   = 243;   // 3^5
 inline constexpr Pattern PATTERN_INVALID = 255;   // encode_response error sentinel
 
 // Compute the Wordle response for guessing `guess` when the answer is `answer`.
-// Both must be exactly WORD_LEN characters.
+//
+// Precondition: both arguments are exactly WORD_LEN (5) lowercase ASCII letters
+// ('a'..'z'). This is guaranteed by WordList::load, which filters the input.
+// Passing anything else is undefined behavior (the letter-tally array is indexed
+// by `c - 'a'` without bounds checks). Violations are caught by an assert in
+// debug builds.
 [[nodiscard]] Pattern
 compute_pattern(std::string_view guess, std::string_view answer) noexcept;
 
 // Decode a Pattern into a 5-char array of 'B'/'Y'/'G' (display order, pos 0 first).
 [[nodiscard]] std::array<char, 5>
 decode_pattern(Pattern p) noexcept;
+
+// Format a Pattern as a 5-char "BYGGB"-style display string.
+[[nodiscard]] std::string
+format_pattern(Pattern p) noexcept;
 
 // Encode a user-supplied response string (e.g. "GYBBB", case-insensitive)
 // into a Pattern. Returns PATTERN_INVALID on invalid input.

@@ -22,9 +22,7 @@ using namespace wp;
 }
 
 static void print_step(int n, std::string_view word, Pattern p) {
-    auto dec = decode_pattern(p);
-    std::println("  {:d}. {}  [{}{}{}{}{} ]", n, word,
-        dec[0], dec[1], dec[2], dec[3], dec[4]);
+    std::println("  {:d}. {}  [{}]", n, word, format_pattern(p));
 }
 
 // ---------------------------------------------------------------------------

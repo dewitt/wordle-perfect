@@ -16,12 +16,11 @@ inline constexpr int WORD_LEN = 5;
 // Word — exactly 5 lowercase ASCII letters
 // ---------------------------------------------------------------------------
 struct Word {
-    std::array<char, WORD_LEN + 1> letters{};  // null-terminated for C interop
+    std::array<char, WORD_LEN> letters{};
 
     constexpr Word() = default;
     explicit constexpr Word(std::string_view sv) noexcept {
         for (int i = 0; i < WORD_LEN; ++i) letters[i] = sv[i];
-        letters[WORD_LEN] = '\0';
     }
 
     [[nodiscard]] constexpr std::string_view view() const noexcept {

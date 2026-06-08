@@ -1,12 +1,19 @@
 #include "pattern.hpp"
 
 #include <array>
+#include <cassert>
 #include <cctype>
 #include <cstdint>
+#include <string>
 
 namespace wp {
 
 Pattern compute_pattern(std::string_view guess, std::string_view answer) noexcept {
+    // Precondition (see header): exactly 5 lowercase a-z letters each. The
+    // letter tally below indexes by `c - 'a'` with no bounds check, so anything
+    // else is UB. WordList::load guarantees this for all stored words.
+    assert(guess.size() == 5 && answer.size() == 5);
+
     // Count of each answer letter available for yellow matching
     // (only non-green positions contribute)
     std::array<int, 26> remaining{};
@@ -50,6 +57,11 @@ std::array<char, 5> decode_pattern(Pattern p) noexcept {
         p = static_cast<Pattern>(p / 3);
     }
     return out;
+}
+
+std::string format_pattern(Pattern p) noexcept {
+    auto dec = decode_pattern(p);
+    return std::string(dec.begin(), dec.end());
 }
 
 Pattern encode_response(std::string_view response) noexcept {
