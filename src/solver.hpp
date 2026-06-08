@@ -226,4 +226,26 @@ private:
     }
 };
 
+// ---------------------------------------------------------------------------
+// Consistency checking (solver mode)
+// ---------------------------------------------------------------------------
+
+// A (guess, response) pair observed during interactive solving.
+struct GuessResponse {
+    std::string_view guess;
+    Pattern          response;
+};
+
+// Returns true iff at least one word in `candidates` would produce every
+// observed (guess, response) pattern — i.e. the responses are mutually
+// consistent with some possible secret word. Used by solver mode to reject
+// logically impossible user input.
+//
+// `candidates` should be the set of *possible secret words* (the answers list,
+// or the full word list for a full-coverage database), NOT the full guess
+// vocabulary — using the guess vocabulary makes the check too permissive.
+[[nodiscard]] bool
+any_consistent_word(const WordList& candidates,
+                    std::span<const GuessResponse> history) noexcept;
+
 } // namespace wp

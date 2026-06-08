@@ -3,12 +3,16 @@
 
 #include "database.hpp"
 #include "pattern.hpp"
+#include "solver.hpp"
 #include "wordlist.hpp"
 
+#include <cstdint>
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <span>
 #include <thread>
+#include <vector>
 
 #include <sqlite3.h>
 
@@ -318,4 +322,58 @@ TEST_CASE("Database - repeated node_info calls return consistent results", "[dat
         CHECK(r->first  == 42);
         CHECK(r->second == 1);
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// End-to-end: build a real greedy decision tree into a DB, then assert every
+// answer word is solvable via walk_target (the same walk the CLI uses). This
+// exercises the full pipeline (solver → DB writes → DB lookups) in one test.
+// ─────────────────────────────────────────────────────────────────────────────
+
+namespace {
+// Recursively build a greedy decision tree for `candidates` into `db`, mirroring
+// the build_db pipeline but using only public library APIs. Returns the node id.
+uint32_t build_greedy_tree(Database& db, const EntropySolver& solver,
+                           const PatternMatrix& pm,
+                           std::vector<uint16_t> candidates, int depth,
+                           uint32_t& next_id) {
+    const uint32_t my_id = next_id++;
+    const uint16_t guess = solver.best_guess(candidates);
+    REQUIRE(db.insert_node(my_id, guess, static_cast<uint8_t>(depth)).has_value());
+
+    auto buckets = EntropySolver::partition(candidates, guess, pm);
+    for (Pattern p = 0; p < PATTERN_COUNT - 1; ++p) {  // skip GGGGG
+        if (buckets[p].empty()) continue;
+        uint32_t child = build_greedy_tree(db, solver, pm, buckets[p],
+                                           depth + 1, next_id);
+        REQUIRE(db.insert_edge(my_id, p, child).has_value());
+    }
+    return my_id;
+}
+}  // namespace
+
+TEST_CASE("end-to-end - built tree solves every answer via walk_target", "[database][e2e]") {
+    auto wl = WordList::load("data/answers.txt");
+    REQUIRE(wl.has_value());
+    auto pm = PatternMatrix::build(*wl);
+    EntropySolver solver{*wl, pm};
+
+    auto db = Database::create(":memory:");
+    REQUIRE(db.has_value());
+
+    REQUIRE(db->begin_transaction().has_value());
+    uint32_t next_id = 0;
+    build_greedy_tree(*db, solver, pm, wl->all_indices(), 1, next_id);
+    REQUIRE(db->commit_transaction().has_value());
+
+    // Every answer word must be reachable and solved by the shared CLI walk.
+    int worst = 0, failures = 0;
+    for (const auto& w : wl->span()) {
+        auto out = walk_target(*db, *wl, w.view());
+        if (out.solved()) worst = std::max(worst, out.depth);
+        else ++failures;
+    }
+    CHECK(failures == 0);
+    CHECK(worst >= 1);
+    CHECK(worst <= 10);  // greedy over the answers-only matrix stays shallow
 }

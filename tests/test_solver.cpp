@@ -236,3 +236,54 @@ TEST_CASE("minimax - reported depth is a sane achievable bound on small sets",
     uint16_t chosen = (gi != WordList::NPOS) ? gi : solver.best_guess(cand);
     CHECK(chosen != WordList::NPOS);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// any_consistent_word — solver-mode consistency check (#11)
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST_CASE("any_consistent_word - empty history is trivially consistent", "[solver]") {
+    auto wl = tiny_wordlist({"crane", "slate", "trail"});
+    CHECK(any_consistent_word(wl, {}));
+}
+
+TEST_CASE("any_consistent_word - true when a candidate matches all responses", "[solver]") {
+    auto wl = tiny_wordlist({"crane", "slate", "trail", "point", "blink"});
+
+    // Use the real pattern crane would produce if the secret were "slate".
+    const Pattern crane_vs_slate = compute_pattern("crane", "slate");
+    std::vector<GuessResponse> hist{{"crane", crane_vs_slate}};
+    // "slate" is in the list and is consistent by construction.
+    CHECK(any_consistent_word(wl, hist));
+}
+
+TEST_CASE("any_consistent_word - false when no candidate matches", "[solver]") {
+    auto wl = tiny_wordlist({"crane", "slate", "trail"});
+
+    // GGGGG for "point" claims the answer is point — but point isn't a candidate,
+    // so no word in the list can satisfy it.
+    std::vector<GuessResponse> hist{{"point", PATTERN_SOLVED}};
+    CHECK_FALSE(any_consistent_word(wl, hist));
+}
+
+TEST_CASE("any_consistent_word - detects mutually inconsistent responses", "[solver]") {
+    auto wl = tiny_wordlist({"crane", "slate", "trail", "point", "blink"});
+
+    // First response says the answer is exactly "crane" (GGGGG). A second,
+    // non-matching response for another guess then contradicts it: no single
+    // word can be both crane AND produce a different pattern.
+    std::vector<GuessResponse> hist{
+        {"crane", PATTERN_SOLVED},
+        {"slate", compute_pattern("slate", "trail")},  // implies answer == trail
+    };
+    CHECK_FALSE(any_consistent_word(wl, hist));
+}
+
+TEST_CASE("any_consistent_word - guess-only word as answer is rejected vs answers set",
+          "[solver]") {
+    // The curated-answers semantics: a GGGGG on a word that is NOT in the
+    // candidate (answer) set is inconsistent, because that word can never be the
+    // secret. This is exactly the #11 behavior the fix introduces.
+    auto answers = tiny_wordlist({"crane", "slate", "trail"});
+    std::vector<GuessResponse> hist{{"tarse", PATTERN_SOLVED}};  // tarse not in set
+    CHECK_FALSE(any_consistent_word(answers, hist));
+}

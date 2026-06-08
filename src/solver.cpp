@@ -551,4 +551,20 @@ SolveResult EntropySolver::solve(uint16_t answer_idx, int max_rounds) const {
     return result;
 }
 
+// ---------------------------------------------------------------------------
+// any_consistent_word — solver-mode consistency check
+// ---------------------------------------------------------------------------
+bool any_consistent_word(const WordList& candidates,
+                         std::span<const GuessResponse> history) noexcept {
+    for (const auto& w : candidates.span()) {
+        std::string_view av = w.view();
+        bool ok = true;
+        for (const auto& [g, r] : history) {
+            if (compute_pattern(g, av) != r) { ok = false; break; }
+        }
+        if (ok) return true;
+    }
+    return false;
+}
+
 } // namespace wp

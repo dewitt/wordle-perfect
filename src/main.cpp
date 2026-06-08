@@ -1,6 +1,7 @@
 #include "wordlist.hpp"
 #include "pattern.hpp"
 #include "database.hpp"
+#include "solver.hpp"  // GuessResponse, any_consistent_word
 
 #include <algorithm>
 #include <cstdlib>
@@ -111,15 +112,22 @@ static void mode_solve(const Database& db, const WordList& words,
 // ---------------------------------------------------------------------------
 // Mode: play — interactive solver (tool guesses, user responds)
 // ---------------------------------------------------------------------------
-static void mode_play(const Database& db, const WordList& words, int max_rounds) {
+// `candidates` is the set of possible secret words to check responses against:
+// the curated answers list (standard DB) or the full word list (full-coverage).
+static void mode_play(const Database& db, const WordList& words,
+                      const WordList& candidates, int max_rounds) {
     auto root_word_res = db.root_word();
     if (!root_word_res) die(root_word_res.error());
 
     uint32_t node = Database::ROOT_ID;
 
-    // Track previous (guess, response) pairs for consistency checking
-    struct Prior { std::string guess; Pattern response; };
-    std::vector<Prior> history;
+    // Track previous (guess, response) pairs for consistency checking. We keep
+    // the guess strings stable so GuessResponse can hold views into them; reserve
+    // up front so the vector never reallocates and invalidates those views.
+    std::vector<std::string>   guess_store;
+    std::vector<GuessResponse> history;
+    guess_store.reserve(static_cast<std::size_t>(max_rounds));
+    history.reserve(static_cast<std::size_t>(max_rounds));
 
     std::println("wordle-perfect solver  (respond with G/Y/B, e.g. BGGYB)");
     std::println("  G = correct letter, correct position");
@@ -154,45 +162,22 @@ static void mode_play(const Database& db, const WordList& words, int max_rounds)
         Pattern p = encode_response(resp);
         if (p == PATTERN_INVALID) die("internal error: encode_response returned invalid pattern");
 
-        // Consistency check: verify this response is compatible with all prior
-        // (guess, response) pairs by ensuring the implied answer constraints agree.
-        // We check by computing what pattern each prior guess would produce for a
-        // hypothetical word that matches the current response, using candidate filtering.
-        // Simplified check: if p == SOLVED, no prior guess should have had a non-SOLVED
-        // response claiming the answer is not this guess.
-        // Full consistency is enforced by the word list: if no word is consistent
-        // with all responses, we error.
-        {
-            // Build remaining candidates consistent with all prior (guess, response) + this one
-            auto all = words.all_indices();
+        // Consistency check: at least one possible secret word must produce all
+        // observed (guess, response) patterns including this one. We check
+        // against the curated candidate set (answers list, or the full list for
+        // a full-coverage DB) — not the full guess vocabulary, which would make
+        // the check too permissive (issue #11).
+        guess_store.emplace_back(guess);
+        history.push_back({guess_store.back(), p});
 
-            // Build a temporary pattern matrix for consistency checking
-            // (only needed here, not the full 14k×14k matrix)
-            // For each candidate, check all prior constraints
-            auto consistent = [&](uint16_t ai) {
-                std::string_view av = words[ai].view();
-                for (auto& [g, r] : history) {
-                    if (compute_pattern(g, av) != r) return false;
-                }
-                // Also check current guess + response
-                if (compute_pattern(guess, av) != p) return false;
-                return true;
-            };
-
-            auto remaining = all | std::views::filter(consistent)
-                                 | std::ranges::to<std::vector>();
-
-            if (remaining.empty()) {
-                std::println(stderr,
-                    "\nerror: response '{}' to '{}' is inconsistent with prior responses",
-                    resp, guess);
-                std::println(stderr,
-                    "no word in the list is consistent with all responses so far");
-                std::exit(1);
-            }
+        if (!any_consistent_word(candidates, history)) {
+            std::println(stderr,
+                "\nerror: response '{}' to '{}' is inconsistent with prior responses",
+                resp, guess);
+            std::println(stderr,
+                "no possible answer is consistent with all responses so far");
+            std::exit(1);
         }
-
-        history.push_back({std::string(guess), p});
 
         if (p == PATTERN_SOLVED) {
             std::println("\nsolved in {} guess{}!", round, round == 1 ? "" : "es");
@@ -372,7 +357,9 @@ int main(int argc, char** argv) {
             if (args.size() < 2) die("solve requires a target word");
             mode_solve(db, words, answers, args[1], max_rounds, full_coverage, mean_depth);
         } else if (cmd == "play") {
-            mode_play(db, words, max_rounds);
+            // Consistency check uses the possible-answer set: full word list for
+            // a full-coverage DB, curated answers otherwise.
+            mode_play(db, words, full_coverage ? words : answers, max_rounds);
         } else if (cmd == "eval") {
             // Default eval target: all words for full-coverage DB, answers otherwise
             std::string eval_path = args.size() >= 2
