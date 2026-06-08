@@ -287,11 +287,15 @@ Database::next_node(uint32_t node_id, Pattern pattern) const {
     sqlite3_bind_int(stmt_next_node_, 1, static_cast<int>(node_id));
     sqlite3_bind_int(stmt_next_node_, 2, static_cast<int>(pattern));
 
-    if (sqlite3_step(stmt_next_node_) != SQLITE_ROW)
+    if (sqlite3_step(stmt_next_node_) != SQLITE_ROW) {
+        sqlite3_reset(stmt_next_node_);
         return std::unexpected(std::format(
             "no edge from node {} for pattern {}", node_id, pattern));
+    }
 
-    return static_cast<uint32_t>(sqlite3_column_int(stmt_next_node_, 0));
+    auto child = static_cast<uint32_t>(sqlite3_column_int(stmt_next_node_, 0));
+    sqlite3_reset(stmt_next_node_);  // don't hold an implicit read txn open
+    return child;
 }
 
 std::expected<std::pair<uint16_t, uint8_t>, std::string>
@@ -308,11 +312,16 @@ Database::node_info(uint32_t node_id) const {
     }
 
     sqlite3_bind_int(stmt_node_info_, 1, static_cast<int>(node_id));
-    if (sqlite3_step(stmt_node_info_) != SQLITE_ROW)
+    if (sqlite3_step(stmt_node_info_) != SQLITE_ROW) {
+        sqlite3_reset(stmt_node_info_);
         return std::unexpected(std::format("node {} not found", node_id));
+    }
 
     auto word_idx = static_cast<uint16_t>(sqlite3_column_int(stmt_node_info_, 0));
     auto depth    = static_cast<uint8_t>(sqlite3_column_int(stmt_node_info_, 1));
+    // Reset immediately so the statement doesn't hold an implicit read
+    // transaction open on the connection between calls.
+    sqlite3_reset(stmt_node_info_);
     return std::pair{word_idx, depth};
 }
 
@@ -406,7 +415,27 @@ std::expected<void, std::string> Database::finalize(const DbMetadata& meta) {
     if (sqlite3_step(*st) != SQLITE_DONE)
         return std::unexpected("failed to write checksum: " + db_errmsg(db_));
 
-    return commit_transaction();
+    if (auto r = commit_transaction(); !r) return r;
+
+    // The DB is write-once and opened read-only at runtime, so WAL buys nothing
+    // and leaves -wal/-shm sidecars next to the published artifact. Checkpoint
+    // any WAL content back into the main file and switch to a rollback journal
+    // so the finalized .db is a single self-contained file (issue #22). These
+    // PRAGMAs must run outside a transaction. Best-effort: a failure here does
+    // not invalidate the (already-committed) data.
+    //
+    // Reset the cached hot-path statements first: a stepped-but-not-reset
+    // statement (e.g. a node_info() lookup done before finalize) holds an
+    // implicit read transaction that would silently block the journal_mode
+    // switch.
+    if (stmt_next_node_) sqlite3_reset(stmt_next_node_);
+    if (stmt_node_info_) sqlite3_reset(stmt_node_info_);
+
+    sqlite3_wal_checkpoint_v2(db_, nullptr, SQLITE_CHECKPOINT_TRUNCATE,
+                              nullptr, nullptr);
+    sqlite3_exec(db_, "PRAGMA journal_mode = DELETE", nullptr, nullptr, nullptr);
+
+    return {};
 }
 
 // ---------------------------------------------------------------------------

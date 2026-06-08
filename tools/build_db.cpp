@@ -415,6 +415,16 @@ int main(int argc, char** argv) {
         std::println("ok");
     }
 
+    // Close the SQLite connection (finalize already switched it to DELETE
+    // journal mode) and remove any residual WAL sidecars so the published .db is
+    // a single self-contained file (issue #22).
+    db = std::unexpected(std::string{});  // destroys the Database, closing sqlite
+    {
+        std::error_code ec;
+        std::filesystem::remove(out_path + "-wal", ec);
+        std::filesystem::remove(out_path + "-shm", ec);
+    }
+
     std::println("done.");
     std::println("  start word  : {}", meta.start_word);
     std::println("  worst case  : {} guesses", ev.worst);
