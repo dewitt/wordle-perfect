@@ -233,7 +233,11 @@ EntropySolver::minimax_inner(std::span<const uint16_t> candidates,
         if (prune_at <= 2) return DEPTH_IMPOSSIBLE;
 
         // First pass: count how many candidates fall in each pattern bucket.
-        std::array<uint8_t, PATTERN_COUNT> counts{};
+        // uint16_t (not uint8_t): although the only production caller gates
+        // minimax to candidate sets ≤ MINIMAX_THRESHOLD, this is public API and
+        // the top-level counts array sees the full candidate set. uint16_t
+        // cannot overflow for any list WordList::load accepts (≤ 65,535 words).
+        std::array<uint16_t, PATTERN_COUNT> counts{};
         for (uint16_t ai : candidates) {
             ++counts[patterns_.get(gi, ai)];
         }

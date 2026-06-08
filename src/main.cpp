@@ -216,7 +216,7 @@ static void mode_play(const Database& db, const WordList& words, int max_rounds)
 // Mode: eval — batch evaluation
 // ---------------------------------------------------------------------------
 static void mode_eval(const Database& db, const WordList& words,
-                      std::string_view eval_file, int max_rounds) {
+                      std::string_view eval_file) {
     // Load evaluation word list
     auto eval_wl = WordList::load(eval_file);
     if (!eval_wl) die(eval_wl.error());
@@ -233,32 +233,28 @@ static void mode_eval(const Database& db, const WordList& words,
             continue;
         }
 
-        uint32_t node = Database::ROOT_ID;
-        int depth = 0;
-        bool solved = false;
+        // Use a generous cap (WALK_DEPTH_CAP) rather than the DB's worst-case
+        // metric: a valid path deeper than the recorded worst case must still
+        // be reported with its true depth, not silently counted as a failure.
+        auto outcome = walk_target(db, words, target);
 
-        for (int round = 1; round <= max_rounds && !solved; ++round) {
-            auto info = db.node_info(node);
-            if (!info) { std::println(stderr, "db error: {}", info.error()); break; }
-            auto [word_idx, d] = *info;
-
-            std::string_view guess = words[word_idx].view();
-            Pattern p = compute_pattern(guess, target);
-            depth = round;
-
-            if (p == PATTERN_SOLVED) { solved = true; break; }
-
-            auto nxt = db.next_node(node, p);
-            if (!nxt) { std::println(stderr, "missing edge for {}", target); break; }
-            node = *nxt;
-        }
-
-        if (solved) {
-            depths.push_back(depth);
-            std::println("{:5}  {}", target, depth);
-        } else {
-            ++failures;
-            std::println("{:5}  FAIL", target);
+        switch (outcome.status) {
+            case WalkOutcome::Status::Solved:
+                depths.push_back(outcome.depth);
+                std::println("{:5}  {}", target, outcome.depth);
+                break;
+            case WalkOutcome::Status::MissingEdge:
+                ++failures;
+                std::println("{:5}  FAIL (no path in tree)", target);
+                break;
+            case WalkOutcome::Status::ExceededCap:
+                ++failures;
+                std::println("{:5}  FAIL (exceeded {} guesses)", target, WALK_DEPTH_CAP);
+                break;
+            case WalkOutcome::Status::DbError:
+                ++failures;
+                std::println(stderr, "db error walking {}", target);
+                break;
         }
     }
 
@@ -266,12 +262,12 @@ static void mode_eval(const Database& db, const WordList& words,
 
     double sum = 0.0;
     int worst = 0;
-    std::vector<int> dist(max_rounds + 1, 0);  // dist[1..max_rounds]
     for (int d : depths) {
         sum += d;
         worst = std::max(worst, d);
-        if (d >= 1 && d <= max_rounds) dist[d]++;
     }
+    std::vector<int> dist(worst + 1, 0);  // dist[1..worst]
+    for (int d : depths) dist[d]++;
     double mean = sum / static_cast<double>(depths.size());
 
     std::println("");
@@ -282,7 +278,7 @@ static void mode_eval(const Database& db, const WordList& words,
     std::println("  worst case      : {} guesses", worst);
     std::println("  mean depth      : {:.4f} guesses", mean);
     std::println("  distribution    :");
-    for (int i = 1; i <= max_rounds; ++i) {
+    for (int i = 1; i <= worst; ++i) {
         if (dist[i] > 0)
             std::println("    {} guesses: {:5d}", i, dist[i]);
     }
@@ -384,7 +380,7 @@ int main(int argc, char** argv) {
             std::string eval_path = args.size() >= 2
                 ? std::string(args[1])
                 : (full_coverage ? words_path : answers_path);
-            mode_eval(db, words, eval_path, max_rounds);
+            mode_eval(db, words, eval_path);
         } else {
             std::println(stderr, "unknown command: {}", cmd);
             return 1;

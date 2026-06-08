@@ -7,7 +7,10 @@
 
 #include <filesystem>
 #include <format>
+#include <fstream>
 #include <thread>
+
+#include <sqlite3.h>
 
 using namespace wp;
 
@@ -178,9 +181,12 @@ TEST_CASE("Database - open fails on missing file", "[database]") {
     CHECK_FALSE(db.has_value());
 }
 
-TEST_CASE("Database - verify_integrity fails on corrupted data (temp file)", "[database]") {
+TEST_CASE("Database - verify_integrity detects post-finalize tampering", "[database]") {
+    // Build and finalize a valid DB, then mutate a node row out-of-band via raw
+    // sqlite3 while leaving the stored checksum stale. verify_integrity() must
+    // then fail. This exercises the database_corruption_detection contract end
+    // to end (the earlier version of this test gave up before tampering).
     std::string path = temp_db_path();
-    // Remove any existing file first
     std::filesystem::remove(path);
 
     {
@@ -192,35 +198,103 @@ TEST_CASE("Database - verify_integrity fails on corrupted data (temp file)", "[d
         REQUIRE(db->insert_edge(0, 7, 1).has_value());
         REQUIRE(db->commit_transaction().has_value());
         REQUIRE(db->finalize(test_meta()).has_value());
-        // DB destroyed here, WAL flushed
+        CHECK(db->verify_integrity().has_value());  // valid before tampering
     }
 
-    // Write a second, different DB to the same path to confirm different
-    // content yields a different checksum (cross-checked by the round-trip
-    // test).  Remove the old file first so `create()` starts fresh.
-    std::filesystem::remove(path);
+    // Tamper: change a node's word_idx but NOT the checksum row.
     {
-        auto db2 = Database::create(path);
-        REQUIRE(db2.has_value());
-        REQUIRE(db2->begin_transaction().has_value());
-        REQUIRE(db2->insert_node(0, 99, 1).has_value());  // different word_idx
-        REQUIRE(db2->commit_transaction().has_value());
-        REQUIRE(db2->finalize(test_meta()).has_value());
+        sqlite3* raw{};
+        REQUIRE(sqlite3_open(path.c_str(), &raw) == SQLITE_OK);
+        REQUIRE(sqlite3_exec(raw, "UPDATE nodes SET word_idx = 999 WHERE id = 1",
+                             nullptr, nullptr, nullptr) == SQLITE_OK);
+        sqlite3_close(raw);
     }
 
-    // The corruption test goal is: a DB with different content than its
-    // stored checksum should fail verify_integrity. We achieve this by:
-    //   1. Writing DB A (content X, checksum of X) → first block above
-    //   2. Overwriting with DB B (content Y, checksum of Y) → second block
-    //   3. Manually overwriting only the content (via raw SQLite) while leaving
-    //      the checksum from step 2 stale.
-    //
-    // Step 3 requires raw sqlite3 linkage in the test; to keep the test
-    // self-contained we skip that here and instead verify that creating a fresh
-    // DB with different content produces a different checksum (cross-checked by
-    // the round-trip test above). Both code paths (hash computation and
-    // store/compare) are exercised by the round-trip and "no checksum" tests.
+    // Re-open and verify: the stored checksum no longer matches the content.
+    {
+        auto db = Database::open(path);
+        REQUIRE(db.has_value());
+        auto r = db->verify_integrity();
+        CHECK_FALSE(r.has_value());  // tampering detected
+    }
+
     std::filesystem::remove(path);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// walk_target — shared tree walk (used by build_db::evaluate and CLI eval)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// A 3-word list ("aaaaa","bbbbb","ccccc") plus a tiny hand-built tree:
+//   root (guess aaaaa) --[BBBBB]--> n1 (guess bbbbb) --[BBBBB]--> n2 (ccccc)
+// So: aaaaa solves in 1, bbbbb in 2, ccccc in 3.
+static std::string make_word_file(const std::vector<std::string>& words) {
+    auto p = (std::filesystem::temp_directory_path() /
+              std::format("wptest_walk_{}.txt",
+                          std::hash<std::thread::id>{}(std::this_thread::get_id())))
+                 .string();
+    std::ofstream f(p);
+    for (auto& w : words) f << w << "\n";
+    return p;
+}
+
+TEST_CASE("walk_target - reports correct depth and missing-edge status", "[database]") {
+    std::string wf = make_word_file({"aaaaa", "bbbbb", "ccccc"});
+    auto wl = WordList::load(wf);
+    std::filesystem::remove(wf);
+    REQUIRE(wl.has_value());
+
+    const uint16_t ia = wl->index_of("aaaaa");
+    const uint16_t ib = wl->index_of("bbbbb");
+    const uint16_t ic = wl->index_of("ccccc");
+    REQUIRE(ia != WordList::NPOS);
+
+    // Patterns for the guesses we place at each node, against each answer.
+    const Pattern a_vs_b = compute_pattern("aaaaa", "bbbbb");
+    const Pattern b_vs_c = compute_pattern("bbbbb", "ccccc");
+
+    auto db = Database::create(":memory:");
+    REQUIRE(db.has_value());
+    REQUIRE(db->begin_transaction().has_value());
+    REQUIRE(db->insert_node(0, ia, 1).has_value());  // root guesses aaaaa
+    REQUIRE(db->insert_node(1, ib, 2).has_value());  // then bbbbb
+    REQUIRE(db->insert_node(2, ic, 3).has_value());  // then ccccc
+    REQUIRE(db->insert_edge(0, a_vs_b, 1).has_value());
+    REQUIRE(db->insert_edge(1, b_vs_c, 2).has_value());
+    REQUIRE(db->commit_transaction().has_value());
+
+    auto oa = walk_target(*db, *wl, "aaaaa");
+    CHECK(oa.solved());
+    CHECK(oa.depth == 1);
+
+    auto ob = walk_target(*db, *wl, "bbbbb");
+    CHECK(ob.solved());
+    CHECK(ob.depth == 2);
+
+    auto oc = walk_target(*db, *wl, "ccccc");
+    CHECK(oc.solved());
+    CHECK(oc.depth == 3);
+}
+
+TEST_CASE("walk_target - missing edge yields MissingEdge, not a long FAIL", "[database]") {
+    std::string wf = make_word_file({"aaaaa", "bbbbb", "ccccc"});
+    auto wl = WordList::load(wf);
+    std::filesystem::remove(wf);
+    REQUIRE(wl.has_value());
+
+    const uint16_t ia = wl->index_of("aaaaa");
+
+    // Root guesses aaaaa but has NO outgoing edges. Any non-solving target
+    // should return MissingEdge immediately.
+    auto db = Database::create(":memory:");
+    REQUIRE(db.has_value());
+    REQUIRE(db->begin_transaction().has_value());
+    REQUIRE(db->insert_node(0, ia, 1).has_value());
+    REQUIRE(db->commit_transaction().has_value());
+
+    auto o = walk_target(*db, *wl, "ccccc");
+    CHECK_FALSE(o.solved());
+    CHECK(o.status == WalkOutcome::Status::MissingEdge);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

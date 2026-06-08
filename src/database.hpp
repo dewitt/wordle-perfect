@@ -111,4 +111,32 @@ private:
     mutable sqlite3_stmt* stmt_node_info_{};
 };
 
+// ---------------------------------------------------------------------------
+// walk_target — follow the decision tree for a known target word.
+//
+// Shared by the build-time evaluator and the CLI eval/solve modes so the
+// walk semantics (cap handling, missing-edge detection) never diverge.
+//
+// `max_rounds` is a hard safety cap on the number of steps, NOT a solve
+// guarantee: it should be set generously (e.g. WALK_DEPTH_CAP) so a valid
+// path longer than the database's recorded worst case is still reported with
+// its true depth rather than being misclassified as a failure.
+// ---------------------------------------------------------------------------
+struct WalkOutcome {
+    enum class Status { Solved, MissingEdge, ExceededCap, DbError };
+    Status status{Status::DbError};
+    int    depth{0};   // number of guesses taken (valid when Solved)
+
+    [[nodiscard]] bool solved() const noexcept { return status == Status::Solved; }
+};
+
+// Generous default cap. The deepest known path (full-coverage DB) is 8; any
+// valid Wordle tree is bounded well below this. Distinguishes a genuinely
+// missing path from one that merely exceeds the database's worst-case metric.
+inline constexpr int WALK_DEPTH_CAP = 16;
+
+[[nodiscard]] WalkOutcome
+walk_target(const Database& db, const WordList& words, std::string_view target,
+            int max_rounds = WALK_DEPTH_CAP);
+
 } // namespace wp

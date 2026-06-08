@@ -10,11 +10,14 @@
 #include <format>
 #include <future>
 #include <iostream>
+#include <optional>
 #include <print>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <vector>
+
+#include <sys/stat.h>
 
 using namespace wp;
 using Clock = std::chrono::steady_clock;
@@ -26,6 +29,20 @@ using Clock = std::chrono::steady_clock;
 
 static double elapsed_s(Clock::time_point t0) {
     return std::chrono::duration<double>(Clock::now() - t0).count();
+}
+
+// Derive an ISO-8601 (YYYY-MM-DD) date from a file's last-modified time.
+// Used to stamp the word-list retrieval date into DB metadata so it can never
+// silently go stale. Returns "unknown" if the file can't be stat'd.
+//
+// Uses POSIX stat() rather than std::chrono::clock_cast: the latter is not
+// available in the Apple-clang libc++ this project builds against on macOS
+// (the same toolchain caveat documented in flake.nix).
+static std::string file_mtime_date(const std::string& path) {
+    struct ::stat st{};
+    if (::stat(path.c_str(), &st) != 0) return "unknown";
+    const std::chrono::sys_seconds tp{std::chrono::seconds{st.st_mtime}};
+    return std::format("{:%Y-%m-%d}", std::chrono::floor<std::chrono::days>(tp));
 }
 
 // ---------------------------------------------------------------------------
@@ -238,31 +255,17 @@ evaluate(const Database& db, const WordList& words, const WordList& answers) {
         auto idx = words.index_of(w.view());
         if (idx == WordList::NPOS) continue;
 
-        uint32_t node  = Database::ROOT_ID;
-        int      depth = 0;
-        bool     solved = false;
+        // Shared walk: generous cap so deep-but-valid paths report their true
+        // depth instead of being misclassified as failures.
+        auto outcome = walk_target(db, words, w.view(),
+                                   static_cast<int>(res.dist.size()) - 1);
 
-        // Follow the tree until GGGGG or a missing edge (cap at dist array size)
-        for (int round = 1; round < static_cast<int>(res.dist.size()); ++round) {
-            auto info = db.node_info(node);
-            if (!info) break;
-            auto [word_idx, d] = *info;
-
-            Pattern p = compute_pattern(words[word_idx].view(), w.view());
-            depth = round;
-
-            if (p == PATTERN_SOLVED) { solved = true; break; }
-
-            auto nxt = db.next_node(node, p);
-            if (!nxt) break;   // missing edge — tree incomplete for this word
-            node = *nxt;
-        }
-
-        if (solved) {
+        if (outcome.solved()) {
             ++res.solved;
-            total += depth;
-            if (depth > res.worst) res.worst = depth;
-            if (depth < static_cast<int>(res.dist.size())) res.dist[depth]++;
+            total += outcome.depth;
+            if (outcome.depth > res.worst) res.worst = outcome.depth;
+            if (outcome.depth < static_cast<int>(res.dist.size()))
+                res.dist[outcome.depth]++;
         } else {
             ++res.failures;
         }
@@ -307,12 +310,14 @@ int main(int argc, char** argv) {
     std::string start_word;                           // empty = let solver choose
     double      answer_weight = 1000.0;               // multiplier for answer words
     std::optional<std::string> answers_explicit;      // set if --answers was given
+    std::string words_date_override;                  // --date override (ISO 8601)
 
     if (auto v = consume("--words");         !v.empty()) words_path           = v;
     if (auto v = consume("--answers");       !v.empty()) answers_explicit     = std::string(v);
     if (auto v = consume("--output");        !v.empty()) out_path             = v;
     if (auto v = consume("--strategy");      !v.empty()) strategy             = v;
     if (auto v = consume("--start-word");    !v.empty()) start_word           = v;
+    if (auto v = consume("--date");          !v.empty()) words_date_override  = v;
     if (auto v = consume("--answer-weight"); !v.empty()) answer_weight = std::stod(std::string(v));
 
     // Apply --full defaults: answers = all words, unless --answers was explicit
@@ -401,9 +406,15 @@ int main(int argc, char** argv) {
 
     // ── Finalize ──────────────────────────────────────────────────────────
     const bool is_full_coverage = (ans->size() == wl->size());
+    // Word-list date: explicit --date wins; otherwise derive from the words
+    // file mtime so the metadata can never silently go stale (issue #20).
+    const std::string words_date = !words_date_override.empty()
+                                 ? words_date_override
+                                 : file_mtime_date(words_path);
+
     DbMetadata meta{
         .words_source    = "https://gist.github.com/SukkaW/92ff13af03a0117e5bafec6c7f7d6dce",
-        .words_date      = "2026-06-07",
+        .words_date      = words_date,
         .answers_source  = is_full_coverage
                          ? "all valid guess words (same as words source)"
                          : "cfreshman/a03ef2cba789d8cf00c08f767e0fad7b (original embed) + eithan/wordlelist (40 post-acquisition NYT additions)",

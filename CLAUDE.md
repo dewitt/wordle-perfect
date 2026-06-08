@@ -94,7 +94,7 @@ The lead agent (Claude Code) is encouraged to delegate to sub-agents for code re
 - **antigravity** (`/Users/dewitt/.local/bin/agy --dangerously-skip-permissions`) — invoke from this directory for code/design review, parallel research, etc.
 - **codex** (`codex --yolo`) — available via PATH at `/opt/homebrew/bin/codex`
 
-Monitor token usage and quota when running multiple agents in parallel. GitHub issues and PRs may be used for coordination and review, but keep the repository **private** at all times.
+Monitor token usage and quota when running multiple agents in parallel. GitHub issues and PRs may be used for coordination and review. The repository is **public** by design; never commit secrets or credentials.
 
 ## Environment
 

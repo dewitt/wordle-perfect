@@ -436,6 +436,37 @@ int64_t Database::edge_count() const {
 }
 
 // ---------------------------------------------------------------------------
+// walk_target — shared tree walk for a known target word
+// ---------------------------------------------------------------------------
+WalkOutcome
+walk_target(const Database& db, const WordList& words, std::string_view target,
+            int max_rounds) {
+    WalkOutcome out;
+    uint32_t node = Database::ROOT_ID;
+
+    for (int round = 1; round <= max_rounds; ++round) {
+        auto info = db.node_info(node);
+        if (!info) { out.status = WalkOutcome::Status::DbError; return out; }
+        auto [word_idx, depth] = *info;
+
+        Pattern p = compute_pattern(words[word_idx].view(), target);
+        out.depth = round;
+
+        if (p == PATTERN_SOLVED) {
+            out.status = WalkOutcome::Status::Solved;
+            return out;
+        }
+
+        auto nxt = db.next_node(node, p);
+        if (!nxt) { out.status = WalkOutcome::Status::MissingEdge; return out; }
+        node = *nxt;
+    }
+
+    out.status = WalkOutcome::Status::ExceededCap;
+    return out;
+}
+
+// ---------------------------------------------------------------------------
 // Dump
 // ---------------------------------------------------------------------------
 void Database::dump(const WordList& words) const {
