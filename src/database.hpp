@@ -7,6 +7,8 @@
 #include <expected>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 struct sqlite3;
 struct sqlite3_stmt;
@@ -91,6 +93,13 @@ public:
     [[nodiscard]] int64_t node_count()  const;
     [[nodiscard]] int64_t edge_count()  const;
 
+    // Bulk export of the tree for conversion to other formats (e.g. BinaryDb).
+    // NodeRow is ordered by id; EdgeRow is ordered by (parent, pattern).
+    struct NodeRow { uint32_t id; uint16_t word_idx; uint8_t depth; };
+    struct EdgeRow { uint32_t parent; Pattern pattern; uint32_t child; };
+    [[nodiscard]] std::expected<std::vector<NodeRow>, std::string> all_nodes() const;
+    [[nodiscard]] std::expected<std::vector<EdgeRow>, std::string> all_edges() const;
+
 private:
     explicit Database(sqlite3* db) : db_{db} {}
 
@@ -130,8 +139,36 @@ struct WalkOutcome {
 // missing path from one that merely exceeds the database's worst-case metric.
 inline constexpr int WALK_DEPTH_CAP = 16;
 
+// Templated on the database type so the same walk works for both the SQLite
+// Database and the mmap'd BinaryDb (both expose node_info/next_node and a
+// ROOT_ID). Any type with those members and that interface satisfies it.
+template <class DB>
 [[nodiscard]] WalkOutcome
-walk_target(const Database& db, const WordList& words, std::string_view target,
-            int max_rounds = WALK_DEPTH_CAP);
+walk_target(const DB& db, const WordList& words, std::string_view target,
+            int max_rounds = WALK_DEPTH_CAP) {
+    WalkOutcome out;
+    uint32_t node = DB::ROOT_ID;
+
+    for (int round = 1; round <= max_rounds; ++round) {
+        auto info = db.node_info(node);
+        if (!info) { out.status = WalkOutcome::Status::DbError; return out; }
+        auto [word_idx, depth] = *info;
+
+        Pattern p = compute_pattern(words[word_idx].view(), target);
+        out.depth = round;
+
+        if (p == PATTERN_SOLVED) {
+            out.status = WalkOutcome::Status::Solved;
+            return out;
+        }
+
+        auto nxt = db.next_node(node, p);
+        if (!nxt) { out.status = WalkOutcome::Status::MissingEdge; return out; }
+        node = *nxt;
+    }
+
+    out.status = WalkOutcome::Status::ExceededCap;
+    return out;
+}
 
 } // namespace wp

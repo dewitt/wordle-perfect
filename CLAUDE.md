@@ -31,8 +31,9 @@ A Wordle solver that precomputes the best-known decision tree over all valid Wor
 - [x] Precomputation pipeline — `build_db` tool; builds SQLite decision tree (~2 min standard, ~1 min full)
 - [x] CLI tool — `wordle` binary; `solve`, `play`, `eval`, `info`, `dump` modes
 - [x] Database integrity — FNV-1a checksum on every open
+- [x] Binary DB format — flat mmap'd `.bin` (`src/binarydb.*`) for true O(1) lookup; `build_db` exports it alongside the SQLite file; CLI auto-detects format. ~42% smaller, ~2× faster, no runtime SQLite dep
 - [x] Hillclimbing — answer-weighted entropy (1000×), minimax, beam, alternative start words
-- [x] Test suite — Catch2 v3, 48 tests, `ctest` in ~4s (pattern, wordlist, solver incl. minimax, database incl. walk_target + real-corruption)
+- [x] Test suite — Catch2 v3, 58 tests, `ctest` in ~4s (pattern, wordlist, solver incl. minimax + consistency, database incl. walk_target + real-corruption + e2e, binarydb incl. SQLite-parity)
 - [x] Code quality — `DEPTH_IMPOSSIBLE` constant, cached DB statements, uint16_t overflow guard, shared `walk_target`, mtime-derived words_date, mode_solve answers validation, FNV hash correctness
 - [x] Full-coverage build mode — `build_db --full` builds `wordle-full.db` covering all 14,855 guess words (worst-case depth 8, 0 failures)
 
@@ -65,11 +66,10 @@ A Wordle solver that precomputes the best-known decision tree over all valid Wor
 
 ## Known limitations
 
-- **Consistency check in `mode_play` uses all 14,855 words**, not the curated 2,355 answers (issue #11). A logically inconsistent response is only flagged if *no word in the full guess list* satisfies all constraints — slightly more permissive than the spec implies.
-- **`EvalResult::dist` is capped at depth 15** in `build_db.cpp`. Words solved at depth ≥ 16 would appear as failures. The current worst case is 8, so this is not a practical concern. (The CLI `eval` mode now uses the shared `walk_target` with `WALK_DEPTH_CAP = 16` and reports true depths rather than capping at the DB's worst-case metric — issue #9, fixed.)
+- **`EvalResult::dist` is capped at depth 15** in `build_db.cpp`. Words solved at depth ≥ 16 would appear as failures. The current worst case is 8, so this is not a practical concern. (The CLI `eval` mode uses the shared `walk_target` with `WALK_DEPTH_CAP = 16` and reports true depths rather than capping at the DB's worst-case metric — issue #9, fixed.)
 - **Worst-case is 6, not 5** for the standard answer set. Greedy + beam from the auto-selected `tarse` opener cannot reach the known worst-case-5 tree; that needs exhaustive depth-first minimax over the answer set (issue #8, open).
 
-See the open GitHub issues (#8–#24) for the full backlog from the code review, including the SIMD/bitmask pattern path (#12) and a flat mmap'd binary DB format for true O(1) lookup (#13).
+See the open GitHub issues for the remaining backlog from the code review — notably the SIMD/bitmask pattern path (#12, open) and the worst-case-5 exhaustive minimax (#8, open). The flat mmap'd binary DB (#13) is now implemented.
 
 ## Spec format
 
@@ -85,8 +85,9 @@ See the open GitHub issues (#8–#24) for the full backlog from the code review,
 | `src/pattern.hpp/cpp` | Wordle pattern computation (G/Y/B encoding, 243 patterns) |
 | `src/wordlist.hpp/cpp` | Sorted word list with O(log N) lookup; rejects lists > 65,535 entries |
 | `src/solver.hpp/cpp` | `EntropySolver`: weighted entropy, minimax, beam re-search, `best_guess_within_budget`; `DEPTH_IMPOSSIBLE` sentinel |
-| `src/database.hpp/cpp` | SQLite decision tree + shared `walk_target` helper (read/write, checksum, metadata, cached hot-path stmts) |
-| `tools/build_db.cpp` | Precomputation pipeline; budget-aware escalation; flags incl. `--full`, `--target-depth`, `--min-escalation-depth`, `--beam-width`, `--date` |
+| `src/database.hpp/cpp` | SQLite decision tree + templated `walk_target` helper + bulk `all_nodes`/`all_edges` export (read/write, checksum, metadata, cached hot-path stmts) |
+| `src/binarydb.hpp/cpp` | Flat mmap'd `.bin` decision tree (`BinaryDb`): header+checksum, direct-indexed nodes, CSR pattern-sorted edges; `export_from(Database)` + read-only mmap lookup |
+| `tools/build_db.cpp` | Precomputation pipeline; budget-aware escalation; exports SQLite + binary; flags incl. `--full`, `--target-depth`, `--min-escalation-depth`, `--beam-width`, `--date`, `--binary`, `--no-binary` |
 | `src/main.cpp` | CLI entry point (`solve`, `play`, `eval`, `info`, `dump`); validates solve targets vs answers list |
 | `data/words.txt` | 14,855 valid Wordle guesses (NYT, June 2026) |
 | `data/answers.txt` | 2,355 valid Wordle answers (NYT, June 2026; includes 40 post-acquisition additions) |
@@ -94,6 +95,7 @@ See the open GitHub issues (#8–#24) for the full backlog from the code review,
 | `tests/test_wordlist.cpp` | WordList load, lookup, and edge case tests |
 | `tests/test_solver.cpp` | PatternMatrix, partition, best_guess, minimax, and end-to-end solve tests |
 | `tests/test_database.cpp` | Database CRUD, metadata, integrity + real-corruption, `walk_target`, cached-statement tests |
+| `tests/test_binarydb.cpp` | BinaryDb export/open round-trip, metadata, integrity + tamper, bad-magic rejection, SQLite-parity over the answers tree |
 
 ## Available agents and tools
 

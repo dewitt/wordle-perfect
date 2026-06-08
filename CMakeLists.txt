@@ -37,6 +37,7 @@ add_library(wordle_core STATIC
   src/wordlist.cpp
   src/solver.cpp
   src/database.cpp
+  src/binarydb.cpp
 )
 target_include_directories(wordle_core PUBLIC src)
 target_link_libraries(wordle_core PUBLIC SQLite::SQLite3 Threads::Threads)
@@ -58,6 +59,7 @@ add_executable(wordle_tests
   tests/test_wordlist.cpp
   tests/test_solver.cpp
   tests/test_database.cpp
+  tests/test_binarydb.cpp
 )
 target_link_libraries(wordle_tests PRIVATE wordle_core Catch2::Catch2WithMain)
 # Run tests from build dir so data/ files are accessible at data/words.txt etc.

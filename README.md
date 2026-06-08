@@ -2,7 +2,7 @@
 
 A Wordle solver built on precomputed, O(1)-lookup decision trees.
 
-The system hillclimbs toward the best-known solution tree — minimizing worst-case solve depth first, then average solve depth — across the full set of valid Wordle words. Precomputed paths are stored in a SQLite database so that each guess in a solve requires exactly one lookup with no runtime search.
+The system hillclimbs toward the best-known solution tree — minimizing worst-case solve depth first, then average solve depth — across the full set of valid Wordle words. Precomputed paths are stored so that each guess in a solve requires exactly one O(1) lookup with no runtime search: SQLite is the build-time format, and a flat `mmap`-able binary (`.bin`) is the dependency-free runtime format. The CLI auto-detects which it's given.
 
 ## Current results
 
@@ -17,7 +17,7 @@ Two precomputed databases are available. The standard DB is the default; the ful
 | Worst case | **6 guesses** |
 | Mean depth | **3.8144 guesses** |
 | Strategy | `answer-weighted-beam-v3` |
-| Per-query latency | ~5 ms (cold DB open); µs amortized |
+| Per-query latency | O(1) lookup; mmap'd binary DB (`wordle.bin`, ~265 KB) or SQLite (`wordle.db`, ~455 KB) |
 
 Distribution:
 
@@ -70,7 +70,7 @@ cmake --build build
 ## Testing
 
 ```sh
-# Run the full test suite (48 tests, ~4s)
+# Run the full test suite (58 tests, ~4s)
 ctest --test-dir build --output-on-failure
 
 # Or run the test binary directly for more verbose output
@@ -112,9 +112,10 @@ All commands accept `--db <path>` (default: `wordle.db`), `--words <path>` (defa
 - **Budget-aware escalation** — the build work-horse (`best_guess_within_budget`). It takes the fast greedy guess unless that guess's worst-case continuation would exceed the remaining depth budget. Only then does it escalate:
   - **small candidate sets (≤ 64):** full alpha-beta **minimax**, seeded by the greedy worst-depth for tight pruning, sub-calls restricted to the candidate pool (O(K^depth)).
   - **large candidate sets:** a **beam re-search** that probes the top-24 entropy guesses with a pruned greedy worst-depth evaluator. Unlike minimax this never iterates the whole vocabulary, so it stays tractable and can attack the repeated-letter trap clusters that form high in the tree. This is what reduced the depth-6 residue from 6 words to 5 and improved the mean.
-- **build_db** — precomputation pipeline. Builds the full decision tree depth-first and writes it to SQLite in a single transaction. Root guess is found in parallel; all other nodes are single-threaded. Tunable via `--target-depth`, `--min-escalation-depth`, `--beam-width`, `--start-word`, `--answer-weight`, and `--date`.
-- **Database** — SQLite with FNV-1a checksum verified on every open. Nodes, edges, and metadata in three tables. ~16,521 nodes (standard DB) / ~16,543 nodes (full-coverage DB). Hot-path lookup statements (`next_node`, `node_info`) are lazily prepared and cached for the lifetime of the connection.
-- **wordle CLI** — thin layer over the database. Each solve step is one SQL lookup. Solution mode validates targets against the answers list and gives a helpful error for valid-guess-but-not-answer inputs.
+ - **build_db** — precomputation pipeline. Builds the full decision tree depth-first and writes it to SQLite in a single transaction, then exports a flat binary alongside it (`<output>.bin`; disable with `--no-binary`). Root guess is found in parallel; all other nodes are single-threaded. Tunable via `--target-depth`, `--min-escalation-depth`, `--beam-width`, `--start-word`, `--answer-weight`, `--date`, and `--binary`.
+- **Database (SQLite)** — the build-time format. FNV-1a checksum verified on every open. Nodes, edges, and metadata in three tables. ~16,521 nodes (standard DB) / ~16,543 nodes (full-coverage DB). Hot-path lookup statements (`next_node`, `node_info`) are lazily prepared and cached for the connection lifetime.
+- **BinaryDb (flat mmap)** — the runtime format (`src/binarydb.*`). A single `mmap`-able file: fixed header (magic, version, counts, FNV-1a checksum, metadata) + a direct-indexed node array + a CSR-style edge array (per-node offset + pattern-sorted slice). `node_info` is a direct array index and `next_node` binary-searches a node's tiny edge slice — genuinely O(1), no SQLite dependency at runtime. ~42% smaller than the SQLite file and ~2× faster end-to-end. This is the format the `constant_time_lookup` invariant intends.
+- **wordle CLI** — thin layer over either backend (auto-detected by magic / `.bin` extension). Each solve step is one O(1) lookup. Solution mode validates targets against the answers list and gives a helpful error for valid-guess-but-not-answer inputs. (`dump` is SQLite-only.)
 
 ## Spec
 

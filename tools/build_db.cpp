@@ -2,6 +2,7 @@
 #include "pattern.hpp"
 #include "solver.hpp"
 #include "database.hpp"
+#include "binarydb.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -263,6 +264,17 @@ int main(int argc, char** argv) {
     if (auto v = consume("--beam-width"); !v.empty()) beam_width = static_cast<std::size_t>(std::stoul(std::string(v)));
     if (auto v = consume("--answer-weight"); !v.empty()) answer_weight = std::stod(std::string(v));
 
+    // Binary export: default to <output>.bin; --binary <path> overrides;
+    // --no-binary disables. The flat mmap format gives true O(1) lookup.
+    std::string binary_path;
+    bool no_binary = [&args]() {
+        auto it = std::ranges::find(args, std::string_view{"--no-binary"});
+        if (it == args.end()) return false;
+        args.erase(it);
+        return true;
+    }();
+    if (auto v = consume("--binary"); !v.empty()) binary_path = v;
+
     // Apply --full defaults: answers = all words, unless --answers was explicit
     if (full_mode) answers_path = answers_explicit.value_or(words_path);
     else if (answers_explicit)  answers_path = *answers_explicit;
@@ -339,6 +351,15 @@ int main(int argc, char** argv) {
         std::println("using forced start word: {}", start_word);
     }
 
+    // Default binary export path = <output>.bin (unless --no-binary or an
+    // explicit --binary path was given).
+    if (binary_path.empty() && !no_binary) {
+        auto dot = out_path.find_last_of('.');
+        std::string stem = (dot == std::string::npos) ? out_path
+                                                       : out_path.substr(0, dot);
+        binary_path = stem + ".bin";
+    }
+
     // ── Tree building ─────────────────────────────────────────────────────
     std::println("building decision tree (strategy={}, {} threads)...", strategy, nthreads);
     t0 = Clock::now();
@@ -384,6 +405,15 @@ int main(int argc, char** argv) {
         meta.start_word = std::string(wl->operator[](ri->first).view());
 
     if (auto r = db->finalize(meta); !r) die(r.error());
+
+    // ── Optional binary export (flat mmap'd format, true O(1) lookup) ───────
+    if (!binary_path.empty()) {
+        std::print("exporting binary db to {}... ", binary_path);
+        std::cout.flush();
+        if (auto r = BinaryDb::export_from(*db, meta, binary_path); !r)
+            die(r.error());
+        std::println("ok");
+    }
 
     std::println("done.");
     std::println("  start word  : {}", meta.start_word);

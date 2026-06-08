@@ -1,7 +1,10 @@
 #include "wordlist.hpp"
 #include "pattern.hpp"
 #include "database.hpp"
+#include "binarydb.hpp"
 #include "solver.hpp"  // GuessResponse, any_consistent_word
+
+#include <fstream>
 
 #include <algorithm>
 #include <cstdlib>
@@ -29,7 +32,8 @@ static void print_step(int n, std::string_view word, Pattern p) {
 // ---------------------------------------------------------------------------
 // Mode: info — print database metadata
 // ---------------------------------------------------------------------------
-static void mode_info(const Database& db) {
+template <class DB>
+static void mode_info(const DB& db) {
     auto meta = db.read_metadata();
     if (!meta) die(meta.error());
     auto& m = *meta;
@@ -56,7 +60,8 @@ static void mode_dump(const Database& db, const WordList& words) {
 // ---------------------------------------------------------------------------
 // Mode: solve — show precomputed path for a known target word
 // ---------------------------------------------------------------------------
-static void mode_solve(const Database& db, const WordList& words,
+template <class DB>
+static void mode_solve(const DB& db, const WordList& words,
                        const WordList& answers, std::string_view target,
                        int max_rounds, bool full_coverage, double mean_depth) {
     // In full-coverage mode, any word in the guess list is a valid target.
@@ -80,7 +85,7 @@ static void mode_solve(const Database& db, const WordList& words,
         }
     }
 
-    uint32_t node = Database::ROOT_ID;
+    uint32_t node = DB::ROOT_ID;
     int step = 0;
 
     std::println("solving: {}", target);
@@ -114,12 +119,13 @@ static void mode_solve(const Database& db, const WordList& words,
 // ---------------------------------------------------------------------------
 // `candidates` is the set of possible secret words to check responses against:
 // the curated answers list (standard DB) or the full word list (full-coverage).
-static void mode_play(const Database& db, const WordList& words,
+template <class DB>
+static void mode_play(const DB& db, const WordList& words,
                       const WordList& candidates, int max_rounds) {
     auto root_word_res = db.root_word();
     if (!root_word_res) die(root_word_res.error());
 
-    uint32_t node = Database::ROOT_ID;
+    uint32_t node = DB::ROOT_ID;
 
     // Track previous (guess, response) pairs for consistency checking. We keep
     // the guess strings stable so GuessResponse can hold views into them; reserve
@@ -198,7 +204,8 @@ static void mode_play(const Database& db, const WordList& words,
 // ---------------------------------------------------------------------------
 // Mode: eval — batch evaluation
 // ---------------------------------------------------------------------------
-static void mode_eval(const Database& db, const WordList& words,
+template <class DB>
+static void mode_eval(const DB& db, const WordList& words,
                       std::string_view eval_file) {
     // Load evaluation word list
     auto eval_wl = WordList::load(eval_file);
@@ -268,6 +275,71 @@ static void mode_eval(const Database& db, const WordList& words,
 }
 
 // ---------------------------------------------------------------------------
+// Format detection + shared command dispatch (works for both DB backends)
+// ---------------------------------------------------------------------------
+
+// True if the file at `path` is a BinaryDb (by magic, or a .bin extension).
+static bool is_binary_db(const std::string& path) {
+    if (path.size() >= 4 && path.compare(path.size() - 4, 4, ".bin") == 0)
+        return true;
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return false;
+    uint64_t magic = 0;
+    f.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+    return f && magic == BinaryDb::MAGIC;
+}
+
+// Runs the read-only commands (info/solve/play/eval) against any DB backend.
+template <class DB>
+static int run_with_db(const DB& db, std::string_view cmd,
+                       const std::vector<std::string_view>& args,
+                       const WordList& words, const WordList& answers,
+                       const std::string& words_path,
+                       const std::string& answers_path) {
+    if (auto r = db.verify_integrity(); !r) {
+        std::println(stderr, "error: database integrity check failed: {}", r.error());
+        return 1;
+    }
+
+    auto meta = db.read_metadata();
+    if (!meta) {
+        std::println(stderr, "warning: could not read database metadata: {}",
+                     meta.error());
+    }
+
+    if (meta && static_cast<int>(words.size()) != meta->total_words) {
+        std::println(stderr,
+            "error: word list has {} words but database was built with {}; "
+            "use the same words file that was used to build the database",
+            words.size(), meta->total_words);
+        return 1;
+    }
+
+    const int    max_rounds    = (meta && meta->worst_case_depth > 0)
+                               ? meta->worst_case_depth : 6;
+    const bool   full_coverage = meta && (meta->total_answers == meta->total_words);
+    const double mean_depth    = meta ? meta->mean_depth : 0.0;
+
+    if (cmd == "info") {
+        mode_info(db);
+    } else if (cmd == "solve") {
+        if (args.size() < 2) die("solve requires a target word");
+        mode_solve(db, words, answers, args[1], max_rounds, full_coverage, mean_depth);
+    } else if (cmd == "play") {
+        mode_play(db, words, full_coverage ? words : answers, max_rounds);
+    } else if (cmd == "eval") {
+        std::string eval_path = args.size() >= 2
+            ? std::string(args[1])
+            : (full_coverage ? words_path : answers_path);
+        mode_eval(db, words, eval_path);
+    } else {
+        std::println(stderr, "unknown command: {}", cmd);
+        return 1;
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 int main(int argc, char** argv) {
@@ -315,62 +387,32 @@ int main(int argc, char** argv) {
     if (!ans_res) die("loading answers list: " + ans_res.error());
     const WordList& answers = *ans_res;
 
-    // All commands except future 'build' need the database
-    if (cmd != "build") {
-        auto db_res = Database::open(db_path);
-        if (!db_res) die("opening database: " + db_res.error());
-        Database& db = *db_res;
+    if (cmd == "build") return 0;  // reserved; build_db is the precompute tool
 
-        // Integrity check on every launch
+    // Auto-detect format: a BinaryDb starts with the WPBINDB magic; anything
+    // else is treated as a SQLite database. .bin paths are assumed binary.
+    const bool looks_binary = is_binary_db(db_path);
+
+    if (looks_binary) {
+        auto db_res = BinaryDb::open(db_path);
+        if (!db_res) die("opening binary database: " + db_res.error());
+        if (cmd == "dump") {
+            die("dump is only supported for the SQLite (.db) format");
+        }
+        return run_with_db(*db_res, cmd, args, words, answers,
+                           words_path, answers_path);
+    }
+
+    auto db_res = Database::open(db_path);
+    if (!db_res) die("opening database: " + db_res.error());
+    Database& db = *db_res;
+    if (cmd == "dump") {
         if (auto r = db.verify_integrity(); !r) {
             std::println(stderr, "error: database integrity check failed: {}", r.error());
             return 1;
         }
-
-        // Read metadata once; derive runtime parameters from it
-        auto meta = db.read_metadata();
-        if (!meta) {
-            std::println(stderr, "warning: could not read database metadata: {}",
-                         meta.error());
-        }
-
-        // Sanity-check: if the runtime word list has a different size than what
-        // the DB was built with, word-index values will silently index wrong words.
-        if (meta && static_cast<int>(words.size()) != meta->total_words) {
-            std::println(stderr,
-                "error: word list has {} words but database was built with {}; "
-                "use the same words file that was used to build the database",
-                words.size(), meta->total_words);
-            return 1;
-        }
-
-        const int    max_rounds   = (meta && meta->worst_case_depth > 0)
-                                  ? meta->worst_case_depth : 6;
-        const bool   full_coverage = meta && (meta->total_answers == meta->total_words);
-        const double mean_depth    = meta ? meta->mean_depth : 0.0;
-
-        if (cmd == "info") {
-            mode_info(db);
-        } else if (cmd == "dump") {
-            mode_dump(db, words);
-        } else if (cmd == "solve") {
-            if (args.size() < 2) die("solve requires a target word");
-            mode_solve(db, words, answers, args[1], max_rounds, full_coverage, mean_depth);
-        } else if (cmd == "play") {
-            // Consistency check uses the possible-answer set: full word list for
-            // a full-coverage DB, curated answers otherwise.
-            mode_play(db, words, full_coverage ? words : answers, max_rounds);
-        } else if (cmd == "eval") {
-            // Default eval target: all words for full-coverage DB, answers otherwise
-            std::string eval_path = args.size() >= 2
-                ? std::string(args[1])
-                : (full_coverage ? words_path : answers_path);
-            mode_eval(db, words, eval_path);
-        } else {
-            std::println(stderr, "unknown command: {}", cmd);
-            return 1;
-        }
+        mode_dump(db, words);
+        return 0;
     }
-
-    return 0;
+    return run_with_db(db, cmd, args, words, answers, words_path, answers_path);
 }
