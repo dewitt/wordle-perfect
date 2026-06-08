@@ -41,7 +41,7 @@ A Wordle solver that precomputes the best-known decision tree over all valid Wor
 - Worst case: 6 guesses (all 2,355 answers solved)
 - Mean depth: 3.8144 guesses
 - Distribution: 0×1, 11×2, 672×3, 1420×4, 247×5, 5×6
-- Database: 16,521 nodes, ~460 KB
+- Database: 16,521 nodes (SQLite `wordle.db` ~455 KB; binary `wordle.bin` ~265 KB)
 - Answers source: cfreshman/a03ef2cba789d8cf00c08f767e0fad7b (original embed) + 40 post-acquisition NYT additions from eithan/wordlelist
 
 **Hillclimbing findings:**

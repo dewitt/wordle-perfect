@@ -160,6 +160,25 @@ TEST_CASE("BinaryDb - verify_integrity passes clean, fails on tamper", "[binaryd
     std::filesystem::remove(path);
 }
 
+TEST_CASE("BinaryDb - dump runs and lists nodes/edges (debug_dump_tool)", "[binarydb]") {
+    // Spec debug_dump_tool invariant: the binary format must offer a dump.
+    auto wl = WordList::load("data/answers.txt");
+    REQUIRE(wl.has_value());
+
+    auto tree = make_small_sqlite();
+    std::string path = tmp_path("dump");
+    std::filesystem::remove(path);
+    REQUIRE(BinaryDb::export_from(tree.db, sample_meta(), path).has_value());
+    auto bin = BinaryDb::open(path);
+    REQUIRE(bin.has_value());
+
+    // Just exercise the code path (output goes to stdout); a crash/throw fails.
+    bin->dump(*wl);
+    SUCCEED("dump completed");
+
+    std::filesystem::remove(path);
+}
+
 TEST_CASE("BinaryDb - open rejects bad magic and missing files", "[binarydb]") {
     std::string path = tmp_path("bad");
     std::filesystem::remove(path);

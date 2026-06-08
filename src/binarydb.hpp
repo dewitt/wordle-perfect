@@ -87,6 +87,10 @@ public:
 
     [[nodiscard]] std::expected<uint16_t, std::string> root_word() const;
 
+    // Human-readable dump of nodes + edges (satisfies the spec debug_dump_tool
+    // invariant for the proprietary binary format).
+    void dump(const WordList& words) const;
+
     [[nodiscard]] uint32_t node_count() const noexcept { return node_count_; }
     [[nodiscard]] uint32_t edge_count() const noexcept { return edge_count_; }
 

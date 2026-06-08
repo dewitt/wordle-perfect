@@ -5,6 +5,7 @@
 #include <cstring>
 #include <format>
 #include <fstream>
+#include <print>
 #include <vector>
 
 #include <fcntl.h>
@@ -330,6 +331,27 @@ std::expected<uint16_t, std::string> BinaryDb::root_word() const {
     auto info = node_info(ROOT_ID);
     if (!info) return std::unexpected(info.error());
     return info->first;
+}
+
+void BinaryDb::dump(const WordList& words) const {
+    const NodeRec* nodes = nodes_of(base_);
+    const EdgeRec* edges = edges_of(base_, node_count_);
+
+    std::println("=== nodes ({}) ===", node_count_);
+    for (uint32_t id = 0; id < node_count_; ++id) {
+        const NodeRec& n = nodes[id];
+        std::println("  node {:6d}  word={:5}  depth={}",
+            id,
+            words.size() > n.word_idx ? words[n.word_idx].view() : "?????",
+            static_cast<int>(n.depth));
+    }
+    std::println("=== edges ({}) ===", edge_count_);
+    for (uint32_t id = 0; id < node_count_; ++id) {
+        for (uint32_t e = nodes[id].edge_off; e < nodes[id + 1].edge_off; ++e) {
+            std::println("  {:6d} --[{}]--> {:6d}",
+                id, format_pattern(edges[e].pattern), edges[e].child);
+        }
+    }
 }
 
 } // namespace wp

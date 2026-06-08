@@ -397,7 +397,13 @@ int main(int argc, char** argv) {
         auto db_res = BinaryDb::open(db_path);
         if (!db_res) die("opening binary database: " + db_res.error());
         if (cmd == "dump") {
-            die("dump is only supported for the SQLite (.db) format");
+            if (auto r = db_res->verify_integrity(); !r) {
+                std::println(stderr, "error: database integrity check failed: {}",
+                             r.error());
+                return 1;
+            }
+            db_res->dump(words);
+            return 0;
         }
         return run_with_db(*db_res, cmd, args, words, answers,
                            words_path, answers_path);
