@@ -88,21 +88,6 @@ TEST_CASE("Database - root_word returns word_idx at root node", "[database]") {
     CHECK(*rw == 7);
 }
 
-TEST_CASE("Database - next_word chains node_info after next_node", "[database]") {
-    auto db = Database::create(":memory:");
-    REQUIRE(db.has_value());
-
-    REQUIRE(db->begin_transaction().has_value());
-    REQUIRE(db->insert_node(0, 11, 1).has_value());
-    REQUIRE(db->insert_node(1, 22, 2).has_value());
-    REQUIRE(db->insert_edge(0, 3, 1).has_value());
-    REQUIRE(db->commit_transaction().has_value());
-
-    auto nw = db->next_word(0, 3);
-    REQUIRE(nw.has_value());
-    CHECK(*nw == 22);  // child node's word_idx
-}
-
 TEST_CASE("Database - missing node returns error", "[database]") {
     auto db = Database::create(":memory:");
     REQUIRE(db.has_value());

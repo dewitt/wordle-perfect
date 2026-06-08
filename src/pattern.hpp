@@ -22,8 +22,9 @@ namespace wp {
 
 using Pattern = uint8_t;
 
-inline constexpr Pattern PATTERN_SOLVED = 242;   // GGGGG — guess == answer
-inline constexpr int     PATTERN_COUNT  = 243;   // 3^5
+inline constexpr Pattern PATTERN_SOLVED  = 242;   // GGGGG — guess == answer
+inline constexpr int     PATTERN_COUNT   = 243;   // 3^5
+inline constexpr Pattern PATTERN_INVALID = 255;   // encode_response error sentinel
 
 // Compute the Wordle response for guessing `guess` when the answer is `answer`.
 // Both must be exactly WORD_LEN characters.
@@ -35,7 +36,7 @@ compute_pattern(std::string_view guess, std::string_view answer) noexcept;
 decode_pattern(Pattern p) noexcept;
 
 // Encode a user-supplied response string (e.g. "GYBBB", case-insensitive)
-// into a Pattern. Returns 255 on invalid input.
+// into a Pattern. Returns PATTERN_INVALID on invalid input.
 [[nodiscard]] Pattern
 encode_response(std::string_view response) noexcept;
 

@@ -53,7 +53,7 @@ std::array<char, 5> decode_pattern(Pattern p) noexcept {
 }
 
 Pattern encode_response(std::string_view response) noexcept {
-    if (response.size() != 5) return 255;
+    if (response.size() != 5) return PATTERN_INVALID;
     Pattern p = 0;
     uint8_t mult = 1;
     for (int i = 0; i < 5; ++i) {
@@ -63,7 +63,7 @@ Pattern encode_response(std::string_view response) noexcept {
             case 'G': digit = 2; break;
             case 'Y': digit = 1; break;
             case 'B': digit = 0; break;
-            default:  return 255;
+            default:  return PATTERN_INVALID;
         }
         p = static_cast<Pattern>(p + digit * mult);
         mult = static_cast<uint8_t>(mult * 3);

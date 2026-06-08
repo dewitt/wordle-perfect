@@ -62,11 +62,6 @@ public:
     [[nodiscard]] std::expected<DbMetadata, std::string> read_metadata()  const;
     [[nodiscard]] std::expected<void, std::string>       write_metadata(const DbMetadata& m);
 
-    // One-step O(1) lookup: current node + pattern → next guess word index.
-    // Returns NULL_NODE (as word_idx) on GGGGG (already solved) or missing child.
-    [[nodiscard]] std::expected<uint16_t, std::string>
-    next_word(uint32_t node_id, Pattern pattern) const;
-
     [[nodiscard]] std::expected<uint32_t, std::string>
     next_node(uint32_t node_id, Pattern pattern) const;
 

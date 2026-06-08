@@ -294,17 +294,6 @@ Database::next_node(uint32_t node_id, Pattern pattern) const {
     return static_cast<uint32_t>(sqlite3_column_int(stmt_next_node_, 0));
 }
 
-std::expected<uint16_t, std::string>
-Database::next_word(uint32_t node_id, Pattern pattern) const {
-    auto child = next_node(node_id, pattern);
-    if (!child) return std::unexpected(child.error());
-    if (*child == NULL_NODE) return WordList::NPOS;
-
-    auto info = node_info(*child);
-    if (!info) return std::unexpected(info.error());
-    return info->first;
-}
-
 std::expected<std::pair<uint16_t, uint8_t>, std::string>
 Database::node_info(uint32_t node_id) const {
     // Lazy-prepare and cache the statement; reset on reuse.

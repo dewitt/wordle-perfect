@@ -154,7 +154,7 @@ static void mode_play(const Database& db, const WordList& words, int max_rounds)
         }
 
         Pattern p = encode_response(resp);
-        if (p == 0xFF) die("internal error: encode_response returned invalid pattern");
+        if (p == PATTERN_INVALID) die("internal error: encode_response returned invalid pattern");
 
         // Consistency check: verify this response is compatible with all prior
         // (guess, response) pairs by ensuring the implied answer constraints agree.
