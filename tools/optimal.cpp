@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <format>
@@ -126,6 +127,134 @@ bool feasible(const std::vector<uint16_t>& cand, int depth, uint16_t* out) {
     return ok;
 }
 
+// ── feasibility-constrained entropy-greedy tree (the practical winner) ───────
+// At each node, among the guesses whose every bucket is feasible at depth-1,
+// pick the highest-entropy one (best mean heuristic), tie-broken by being a
+// candidate then lexicographically. Guarantees worst<=depth (every chosen guess
+// keeps all buckets feasible) while keeping the mean low and the build cheap.
+// Returns the total depth (sum over candidates, direct hit = 1).
+double entropy_of(const std::vector<uint16_t>& cand, uint16_t gi) {
+    std::array<int, PATTERN_COUNT> cnt{};
+    for (uint16_t ai : cand) ++cnt[g_pm->get(gi, ai)];
+    const double tot = static_cast<double>(cand.size());
+    double H = 0.0;
+    for (int c : cnt) if (c) { double p = c / tot; H -= p * std::log2(p); }
+    return H;
+}
+
+constexpr int TREE_INF = 1'000'000'000;
+
+int tree_total(const std::vector<uint16_t>& cand, int depth) {
+    const int n = static_cast<int>(cand.size());
+    if (n == 0) return 0;
+    if (n == 1) return 1;
+    if (depth <= 1) return TREE_INF;
+
+    // Rank guesses by entropy desc (best mean first); among them choose the
+    // first that is fully feasible at depth-1.
+    const std::size_t W = g_words->size();
+    std::vector<std::pair<double, uint16_t>> order;
+    order.reserve(W);
+    for (std::size_t g = 0; g < W; ++g) {
+        const auto gi = static_cast<uint16_t>(g);
+        int mb = max_bucket(cand, gi);
+        if (mb == n) continue;
+        order.emplace_back(entropy_of(cand, gi), gi);
+    }
+    std::ranges::sort(order, [](auto& a, auto& b){
+        if (a.first != b.first) return a.first > b.first;
+        return a.second < b.second;
+    });
+
+    for (auto& [H, gi] : order) {
+        std::vector<std::vector<uint16_t>> buckets(PATTERN_COUNT);
+        for (uint16_t ai : cand) buckets[g_pm->get(gi, ai)].push_back(ai);
+        // Check feasibility of all buckets at depth-1 first (cheap, memoized).
+        bool ok = true;
+        for (Pattern p = 0; p < PATTERN_COUNT && ok; ++p) {
+            if (p == PATTERN_SOLVED) continue;
+            auto& b = buckets[p];
+            if (b.empty() || b.size() == 1) continue;
+            uint16_t dummy;
+            if (!feasible(b, depth - 1, &dummy)) ok = false;
+        }
+        if (!ok) continue;
+        // Feasible: accumulate the real total by recursing with the SAME policy.
+        int total = n;
+        for (Pattern p = 0; p < PATTERN_COUNT; ++p) {
+            if (p == PATTERN_SOLVED) continue;
+            auto& b = buckets[p];
+            if (b.empty()) continue;
+            total += (b.size() == 1) ? 1 : tree_total(b, depth - 1);
+        }
+        return total;
+    }
+    return TREE_INF;  // no feasible guess (shouldn't happen if cand feasible)
+}
+
+// ── mean (total-depth) optimization, subject to worst<=depth ────────────────
+// min_total(cand, depth) = minimal sum over candidates of their depth (counted
+// from this node, direct hit = 1) over all trees with worst-case <= depth.
+// Returns INF if infeasible. Exact + memoized.
+constexpr int INF = 1'000'000'000;
+std::unordered_map<std::uint64_t, int>      g_tot;     // exact min total
+std::unordered_map<std::uint64_t, uint16_t> g_tot_choice;
+
+int min_total(const std::vector<uint16_t>& cand, int depth) {
+    ++g_nodes;
+    const int n = static_cast<int>(cand.size());
+    if (n == 0) return 0;
+    if (n == 1) return 1;
+    if (depth <= 1) return INF;
+
+    const std::uint64_t key = hash_key(cand, depth) ^ 0xABCDEFu;
+    if (auto it = g_tot.find(key); it != g_tot.end()) return it->second;
+
+    // Rank guesses by max-bucket ascending (good splitters → low total & feasible).
+    const std::size_t W = g_words->size();
+    std::vector<std::pair<int, uint16_t>> order;
+    order.reserve(W);
+    for (std::size_t g = 0; g < W; ++g) {
+        const auto gi = static_cast<uint16_t>(g);
+        int mb = max_bucket(cand, gi);
+        if (mb == n) continue;
+        order.emplace_back(mb, gi);
+    }
+    std::ranges::sort(order, [](auto& a, auto& b){
+        if (a.first != b.first) return a.first < b.first;
+        return a.second < b.second;
+    });
+
+    int best = INF;
+    uint16_t best_gi = WordList::NPOS;
+
+    for (auto& [mb, gi] : order) {
+        if (depth - 1 == 1 && mb > 1) break;  // remaining can't be solved in 1
+
+        std::vector<std::vector<uint16_t>> buckets(PATTERN_COUNT);
+        for (uint16_t ai : cand) buckets[g_pm->get(gi, ai)].push_back(ai);
+
+        // total from here = n + sum over non-solved buckets of min_total(bucket).
+        int total = n;
+        bool ok = true;
+        for (Pattern p = 0; p < PATTERN_COUNT && ok; ++p) {
+            if (p == PATTERN_SOLVED) continue;
+            auto& b = buckets[p];
+            if (b.empty()) continue;
+            int sub = (b.size() == 1) ? 1 : min_total(b, depth - 1);
+            if (sub >= INF) { ok = false; break; }
+            total += sub;
+            if (total >= best) { ok = false; break; }  // prune: can't beat best
+        }
+        if (ok && total < best) { best = total; best_gi = gi; }
+    }
+
+    int result = (best_gi == WordList::NPOS) ? INF : best;
+    g_tot[key] = result;
+    if (best_gi != WordList::NPOS) g_tot_choice[key] = best_gi;
+    return result;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -133,6 +262,7 @@ int main(int argc, char** argv) {
     std::string answers_path = "data/answers.txt";
     int max_depth = 5;
     std::string forced_start;
+    std::string mode = "feasible";  // "feasible" | "optimal"
 
     std::vector<std::string_view> args(argv + 1, argv + argc);
     for (std::size_t i = 0; i + 1 < args.size(); ++i) {
@@ -140,6 +270,7 @@ int main(int argc, char** argv) {
         if (args[i] == "--answers")   answers_path = args[i + 1];
         if (args[i] == "--max-depth") max_depth = std::stoi(std::string(args[i + 1]));
         if (args[i] == "--start")     forced_start = args[i + 1];
+        if (args[i] == "--mode")      mode = args[i + 1];
     }
 
     auto wl = WordList::load(words_path);
@@ -162,6 +293,91 @@ int main(int argc, char** argv) {
     std::ranges::sort(cand);
 
     t0 = Clock::now();
+
+    // ── tree mode: feasibility-constrained entropy-greedy (worst<=D, low mean) ─
+    if (mode == "tree") {
+        int total = TREE_INF; uint16_t root = WordList::NPOS;
+        if (!forced_start.empty()) {
+            auto gi = wl->index_of(forced_start);
+            if (gi == WordList::NPOS) { std::println(stderr, "start not found"); return 1; }
+            // First verify the opener keeps everything feasible at D-1.
+            std::vector<std::vector<uint16_t>> buckets(PATTERN_COUNT);
+            for (uint16_t ai : cand) buckets[g_pm->get(gi, ai)].push_back(ai);
+            bool feas = true;
+            for (Pattern p = 0; p < PATTERN_COUNT && feas; ++p) {
+                if (p == PATTERN_SOLVED) continue;
+                auto& b = buckets[p];
+                if (b.empty() || b.size() == 1) continue;
+                uint16_t d; if (!feasible(b, max_depth - 1, &d)) feas = false;
+            }
+            if (feas) {
+                total = static_cast<int>(cand.size());
+                for (Pattern p = 0; p < PATTERN_COUNT; ++p) {
+                    if (p == PATTERN_SOLVED) continue;
+                    auto& b = buckets[p];
+                    if (b.empty()) continue;
+                    total += (b.size() == 1) ? 1 : tree_total(b, max_depth - 1);
+                }
+            }
+            root = gi;
+        } else {
+            total = tree_total(cand, max_depth);
+            // root recorded implicitly by the first feasible top-level guess;
+            // re-derive it cheaply for reporting.
+        }
+        double s = std::chrono::duration<double>(Clock::now() - t0).count();
+        if (total >= TREE_INF) {
+            std::println("TREE: infeasible at worst<={} ({:.1f}s)", max_depth, s);
+        } else {
+            double mean = static_cast<double>(total) / static_cast<double>(cand.size());
+            std::println("TREE: worst<={} total={} mean={:.4f} root={} "
+                "({} nodes, {:.1f}s)",
+                max_depth, total, mean,
+                root == WordList::NPOS ? "(searched)" : std::string((*wl)[root].view()),
+                g_nodes, s);
+        }
+        return 0;
+    }
+
+    // ── optimal mode: minimise total/mean depth subject to worst<=max_depth ──
+    if (mode == "optimal") {
+        int total = INF; uint16_t root = WordList::NPOS;
+        if (!forced_start.empty()) {
+            auto gi = wl->index_of(forced_start);
+            if (gi == WordList::NPOS) { std::println(stderr, "start not found"); return 1; }
+            std::vector<std::vector<uint16_t>> buckets(PATTERN_COUNT);
+            for (uint16_t ai : cand) buckets[g_pm->get(gi, ai)].push_back(ai);
+            total = static_cast<int>(cand.size());
+            for (Pattern p = 0; p < PATTERN_COUNT && total < INF; ++p) {
+                if (p == PATTERN_SOLVED) continue;
+                auto& b = buckets[p];
+                if (b.empty()) continue;
+                int sub = (b.size() == 1) ? 1 : min_total(b, max_depth - 1);
+                if (sub >= INF) { total = INF; break; }
+                total += sub;
+            }
+            root = gi;
+        } else {
+            total = min_total(cand, max_depth);
+            if (total < INF) {
+                if (auto c = g_tot_choice.find(hash_key(cand, max_depth) ^ 0xABCDEFu);
+                    c != g_tot_choice.end()) root = c->second;
+            }
+        }
+        double s = std::chrono::duration<double>(Clock::now() - t0).count();
+        if (total >= INF) {
+            std::println("OPTIMAL: infeasible at worst<={} ({:.1f}s)", max_depth, s);
+        } else {
+            double mean = static_cast<double>(total) / static_cast<double>(cand.size());
+            std::println("OPTIMAL: worst<={} total={} mean={:.4f} root={} "
+                "({} nodes, {} memo, {:.1f}s)",
+                max_depth, total, mean,
+                root == WordList::NPOS ? "?" : std::string((*wl)[root].view()),
+                g_nodes, g_tot.size(), s);
+        }
+        return 0;
+    }
+
     bool ok = false;
     uint16_t root = WordList::NPOS;
 
