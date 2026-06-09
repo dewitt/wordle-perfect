@@ -552,6 +552,193 @@ SolveResult EntropySolver::solve(uint16_t answer_idx, int max_rounds) const {
 }
 
 // ---------------------------------------------------------------------------
+// Optimal (worst-case-bounded) tree construction: is_feasible / best_guess_feasible
+// ---------------------------------------------------------------------------
+namespace {
+std::uint64_t feas_hash(std::span<const uint16_t> s, int depth) {
+    std::uint64_t h = 1469598103934665603ULL;
+    auto mix = [&](std::uint64_t x){ h ^= x; h *= 1099511628211ULL; };
+    for (uint16_t v : s) mix(v + 1u);
+    mix(0x5A17u);
+    mix(static_cast<std::uint64_t>(depth));
+    return h;
+}
+}  // namespace
+
+double EntropySolver::entropy_simple(std::span<const uint16_t> candidates,
+                                     uint16_t guess_idx) const noexcept {
+    std::array<int, PATTERN_COUNT> cnt{};
+    for (uint16_t ai : candidates) ++cnt[patterns_.get(guess_idx, ai)];
+    const double tot = static_cast<double>(candidates.size());
+    double H = 0.0;
+    for (int c : cnt) if (c) { double p = c / tot; H -= p * std::log2(p); }
+    return H;
+}
+
+bool EntropySolver::is_feasible(std::span<const uint16_t> candidates, int depth,
+                                uint16_t* witness) const {
+    const int n = static_cast<int>(candidates.size());
+    if (n <= 1) { if (witness && n == 1) *witness = candidates[0]; return true; }
+    if (depth <= 1) return false;
+    // Admissible bound: with one guess (243 patterns), depth==2 can distinguish
+    // at most 243 words into singleton buckets.
+    if (depth == 2 && n > PATTERN_COUNT) return false;
+
+    const std::uint64_t key = feas_hash(candidates, depth);
+    if (auto it = feas_memo_.find(key); it != feas_memo_.end()) {
+        if (it->second == 1 && witness) {
+            if (auto w = feas_witness_.find(key); w != feas_witness_.end())
+                *witness = w->second;
+        }
+        return it->second == 1;
+    }
+
+    // Order guesses by max-bucket ascending (best splitters first → prune hard).
+    const std::size_t W = words_.size();
+    std::vector<std::pair<int, uint16_t>> order;
+    order.reserve(W);
+    for (std::size_t g = 0; g < W; ++g) {
+        const auto gi = static_cast<uint16_t>(g);
+        std::array<uint16_t, PATTERN_COUNT> cnt{};
+        int mb = 0;
+        for (uint16_t ai : candidates) { int c = ++cnt[patterns_.get(gi, ai)]; if (c > mb) mb = c; }
+        if (mb == n) continue;  // no progress
+        order.emplace_back(mb, gi);
+    }
+    std::ranges::sort(order, [](auto& a, auto& b){
+        if (a.first != b.first) return a.first < b.first;
+        return a.second < b.second;
+    });
+
+    bool ok = false;
+    uint16_t chosen = WordList::NPOS;
+    for (auto& [mb, gi] : order) {
+        if (depth - 1 == 1 && mb > 1) break;  // remaining can't solve in 1 guess
+        auto buckets = partition(candidates, gi, patterns_);
+        bool all_ok = true;
+        for (Pattern p = 0; p < PATTERN_COUNT && all_ok; ++p) {
+            if (p == PATTERN_SOLVED) continue;
+            if (buckets[p].empty()) continue;
+            if (!is_feasible(buckets[p], depth - 1, nullptr)) all_ok = false;
+        }
+        if (all_ok) { ok = true; chosen = gi; break; }
+    }
+
+    feas_memo_[key] = ok ? 1 : 2;
+    if (ok) { feas_witness_[key] = chosen; if (witness) *witness = chosen; }
+    return ok;
+}
+
+int EntropySolver::feasible_total(std::span<const uint16_t> candidates,
+                                  int budget) const {
+    const int n = static_cast<int>(candidates.size());
+    if (n == 0) return 0;
+    if (n == 1) return 1;
+    if (budget <= 1) return std::numeric_limits<int>::max();
+
+    // Pick the highest-entropy feasible guess (lookahead 1) and accumulate.
+    uint16_t gi = best_guess_feasible(candidates, budget, /*lookahead=*/1);
+    if (gi == WordList::NPOS) return std::numeric_limits<int>::max();
+
+    auto buckets = partition(candidates, gi, patterns_);
+    int total = n;
+    for (Pattern p = 0; p < PATTERN_COUNT; ++p) {
+        if (p == PATTERN_SOLVED) continue;
+        auto& b = buckets[p];
+        if (b.empty()) continue;
+        total += (b.size() == 1) ? 1 : feasible_total(b, budget - 1);
+    }
+    return total;
+}
+
+uint16_t EntropySolver::best_guess_feasible(std::span<const uint16_t> candidates,
+                                            int budget,
+                                            std::size_t lookahead) const {
+    const int n = static_cast<int>(candidates.size());
+    if (n == 0) return WordList::NPOS;
+    if (n == 1) return candidates[0];
+    if (n == 2) return candidates[0];
+    if (budget <= 1) return WordList::NPOS;
+
+    // Memoized choice: the production build calls this once per node, and many
+    // candidate sets recur across the tree. Key on (set, budget, lookahead).
+    const std::uint64_t ckey =
+        feas_hash(candidates, budget) ^ (0xC0FFEEull * lookahead + 1);
+    if (auto it = feas_choice_.find(ckey); it != feas_choice_.end())
+        return it->second;
+
+    // Guarantee a feasible fallback exists (and warm the feasibility memo for
+    // this set). The witness is a guess that keeps every bucket solvable within
+    // budget; if the set isn't feasible at all, bail.
+    uint16_t witness = WordList::NPOS;
+    if (!is_feasible(candidates, budget, &witness)) {
+        feas_choice_[ckey] = WordList::NPOS;
+        return WordList::NPOS;
+    }
+
+    // Rank guesses by entropy desc (low-mean heuristic), then check feasibility
+    // on only the top EXPLORE_POOL of them. This bounds per-node cost: feasibility
+    // checks (the expensive part) run on a small, promising pool, not all ~15k
+    // words. The witness guarantees we always have a feasible choice.
+    constexpr std::size_t EXPLORE_POOL = 80;
+    const std::size_t W = words_.size();
+    std::vector<std::pair<double, uint16_t>> order;
+    order.reserve(W);
+    for (std::size_t g = 0; g < W; ++g) {
+        const auto gi = static_cast<uint16_t>(g);
+        std::array<uint16_t, PATTERN_COUNT> cnt{};
+        int mb = 0;
+        for (uint16_t ai : candidates) { int c = ++cnt[patterns_.get(gi, ai)]; if (c > mb) mb = c; }
+        if (mb == n) continue;
+        order.emplace_back(entropy_simple(candidates, gi), gi);
+    }
+    const std::size_t pool = std::min<std::size_t>(EXPLORE_POOL, order.size());
+    std::ranges::partial_sort(order, order.begin() + static_cast<std::ptrdiff_t>(pool),
+        [](auto& a, auto& b){
+            if (a.first != b.first) return a.first > b.first;
+            return a.second < b.second;
+        });
+    order.resize(pool);
+
+    // Expand up to `lookahead` feasible guesses; keep the one with lowest total.
+    uint16_t best_gi = WordList::NPOS;
+    int      best_total = std::numeric_limits<int>::max();
+    std::size_t expanded = 0;
+
+    for (auto& [H, gi] : order) {
+        if (expanded >= lookahead && best_gi != WordList::NPOS) break;
+        auto buckets = partition(candidates, gi, patterns_);
+        bool feasible_here = true;
+        for (Pattern p = 0; p < PATTERN_COUNT && feasible_here; ++p) {
+            if (p == PATTERN_SOLVED) continue;
+            auto& b = buckets[p];
+            if (b.size() <= 1) continue;
+            if (!is_feasible(b, budget - 1, nullptr)) feasible_here = false;
+        }
+        if (!feasible_here) continue;
+        ++expanded;
+
+        if (lookahead <= 1) { feas_choice_[ckey] = gi; return gi; }
+
+        // Estimate total depth under a greedy continuation for tie-breaking.
+        int total = n;
+        for (Pattern p = 0; p < PATTERN_COUNT; ++p) {
+            if (p == PATTERN_SOLVED) continue;
+            auto& b = buckets[p];
+            if (b.empty()) continue;
+            total += (b.size() == 1) ? 1
+                   : feasible_total(b, budget - 1);
+        }
+        if (total < best_total) { best_total = total; best_gi = gi; }
+    }
+    // If no high-entropy pool member was feasible, fall back to the guaranteed
+    // feasible witness (worst-case correctness over mean).
+    if (best_gi == WordList::NPOS) best_gi = witness;
+    feas_choice_[ckey] = best_gi;
+    return best_gi;
+}
+
+// ---------------------------------------------------------------------------
 // any_consistent_word — solver-mode consistency check
 // ---------------------------------------------------------------------------
 bool any_consistent_word(const WordList& candidates,

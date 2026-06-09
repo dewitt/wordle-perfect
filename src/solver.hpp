@@ -8,6 +8,7 @@
 #include <functional>
 #include <limits>
 #include <span>
+#include <unordered_map>
 #include <vector>
 
 namespace wp {
@@ -175,6 +176,28 @@ public:
     //
     // Returns {best_guess_idx, achieved_worst_depth}. Falls back to the greedy
     // guess (and its depth) if no beam member improves on it.
+    // ── Optimal (worst-case-bounded) tree construction (issue #8) ───────────
+    //
+    // is_feasible(candidates, depth): true iff `candidates` can be solved with
+    // worst-case depth <= `depth`. DFS minimax over the answer set with
+    // memoization on the sorted candidate set and max-bucket guess ordering.
+    // Optionally returns a witness guess that keeps every bucket feasible.
+    [[nodiscard]] bool
+    is_feasible(std::span<const uint16_t> candidates, int depth,
+                uint16_t* witness = nullptr) const;
+
+    // best_guess_feasible: among guesses whose every resulting bucket is
+    // feasible at depth-1, pick the highest-entropy one (low-mean heuristic),
+    // tie-broken by candidate-ness then lexicographically. Guarantees the
+    // returned guess keeps the whole subtree solvable within `budget` IF the
+    // candidate set is feasible at `budget`. Returns NPOS only if infeasible.
+    //
+    // `lookahead` > 1 expands the top-N feasible guesses and keeps the one whose
+    // greedy continuation yields the lowest total depth (better mean).
+    [[nodiscard]] uint16_t
+    best_guess_feasible(std::span<const uint16_t> candidates, int budget,
+                        std::size_t lookahead = 1) const;
+
     [[nodiscard]] std::pair<uint16_t, int>
     best_guess_beam(std::span<const uint16_t> candidates,
                     int budget,
@@ -224,6 +247,22 @@ private:
     double weight_of(uint16_t idx) const noexcept {
         return weight_fn_ ? weight_fn_(idx) : 1.0;
     }
+
+    // Feasibility memo for is_feasible(): key = hash(sorted candidate set, depth)
+    // → 1 feasible / 2 infeasible, plus a witness guess. Mutable so the public
+    // const API can cache.  Cleared lazily is unnecessary; lives for the solver.
+    mutable std::unordered_map<std::uint64_t, char>     feas_memo_;
+    mutable std::unordered_map<std::uint64_t, uint16_t> feas_witness_;
+    // Cache of best_guess_feasible's chosen guess per (candidate set, budget),
+    // so the production build (which calls it once per node) doesn't recompute
+    // the full-vocabulary entropy ranking for recurring candidate sets.
+    mutable std::unordered_map<std::uint64_t, uint16_t> feas_choice_;
+    [[nodiscard]] double entropy_simple(std::span<const uint16_t> candidates,
+                                        uint16_t guess_idx) const noexcept;
+    // Total depth (sum over candidates, direct hit = 1) under the entropy-greedy
+    // feasible policy; used by best_guess_feasible's lookahead tie-break.
+    [[nodiscard]] int feasible_total(std::span<const uint16_t> candidates,
+                                     int budget) const;
 };
 
 // ---------------------------------------------------------------------------

@@ -16,6 +16,10 @@
 #include "wordlist.hpp"
 #include "pattern.hpp"
 #include "solver.hpp"
+#include "database.hpp"
+#include "binarydb.hpp"
+
+#include <filesystem>
 
 #include <algorithm>
 #include <chrono>
@@ -37,6 +41,7 @@ namespace {
 const WordList*      g_words = nullptr;
 const PatternMatrix* g_pm    = nullptr;
 std::uint64_t        g_nodes = 0;
+int                  g_max_depth = 5;
 
 // ── feasibility memo ────────────────────────────────────────────────────────
 // Key: hash(sorted candidate set) combined with depth. Value: feasible?
@@ -147,6 +152,7 @@ int g_lookahead = 1;  // how many top-entropy feasible guesses to expand per nod
 
 // Memo for tree_total: many sub-candidate-sets recur. Key on (set, depth).
 std::unordered_map<std::uint64_t, int> g_tree;
+std::unordered_map<std::uint64_t, uint16_t> g_tree_choice;  // winning guess per set
 
 int tree_total(const std::vector<uint16_t>& cand, int depth) {
     const int n = static_cast<int>(cand.size());
@@ -173,6 +179,7 @@ int tree_total(const std::vector<uint16_t>& cand, int depth) {
     });
 
     int best = TREE_INF;
+    uint16_t best_gi = WordList::NPOS;
     int expanded = 0;
     for (auto& [H, gi] : order) {
         if (expanded >= g_lookahead) break;
@@ -197,10 +204,49 @@ int tree_total(const std::vector<uint16_t>& cand, int depth) {
             if (b.empty()) continue;
             total += (b.size() == 1) ? 1 : tree_total(b, depth - 1);
         }
-        best = std::min(best, total);
+        if (total < best) { best = total; best_gi = gi; }
     }
     g_tree[key] = best;
+    if (best_gi != WordList::NPOS) g_tree_choice[key] = best_gi;
     return best;
+}
+
+// Return the chosen guess for a candidate set (must have been computed by
+// tree_total first). For singletons, the guess is the candidate itself.
+uint16_t tree_choice(const std::vector<uint16_t>& cand, int depth) {
+    if (cand.size() == 1) return cand[0];
+    auto it = g_tree_choice.find(hash_key(cand, depth) ^ 0x7EE5u);
+    return it == g_tree_choice.end() ? WordList::NPOS : it->second;
+}
+
+// Recursively emit the decision tree into a Database using the choices computed
+// by tree_total. Returns the node id. `forced_guess` overrides the choice at the
+// root (to honour an explicit opener).
+uint32_t emit_tree(Database& db, const std::vector<uint16_t>& cand, int depth,
+                   uint32_t& next_id, uint16_t forced_guess = WordList::NPOS) {
+    const uint32_t id = next_id++;
+    uint16_t guess = (forced_guess != WordList::NPOS) ? forced_guess
+                                                      : tree_choice(cand, depth);
+    if (guess == WordList::NPOS) {
+        std::println(stderr, "emit: no choice for set of size {} at depth {}",
+            cand.size(), depth);
+        std::exit(1);
+    }
+    // node round-depth = (max_depth - remaining_budget + 1); g_max_depth holds
+    // the configured worst-case bound.
+    const uint8_t round = static_cast<uint8_t>(g_max_depth - depth + 1);
+    if (auto r = db.insert_node(id, guess, round); !r) { std::println(stderr, "{}", r.error()); std::exit(1); }
+
+    std::vector<std::vector<uint16_t>> buckets(PATTERN_COUNT);
+    for (uint16_t ai : cand) buckets[g_pm->get(guess, ai)].push_back(ai);
+    for (Pattern p = 0; p < PATTERN_COUNT; ++p) {
+        if (p == PATTERN_SOLVED) continue;
+        auto& b = buckets[p];
+        if (b.empty()) continue;
+        uint32_t child = emit_tree(db, b, depth - 1, next_id);
+        if (auto r = db.insert_edge(id, p, child); !r) { std::println(stderr, "{}", r.error()); std::exit(1); }
+    }
+    return id;
 }
 
 // ── mean (total-depth) optimization, subject to worst<=depth ────────────────
@@ -273,7 +319,8 @@ int main(int argc, char** argv) {
     std::string answers_path = "data/answers.txt";
     int max_depth = 5;
     std::string forced_start;
-    std::string mode = "feasible";  // "feasible" | "optimal"
+    std::string mode = "feasible";  // "feasible" | "optimal" | "tree"
+    std::string emit_path;          // if set (tree mode), write DB here
 
     std::vector<std::string_view> args(argv + 1, argv + argc);
     for (std::size_t i = 0; i + 1 < args.size(); ++i) {
@@ -282,6 +329,7 @@ int main(int argc, char** argv) {
         if (args[i] == "--max-depth") max_depth = std::stoi(std::string(args[i + 1]));
         if (args[i] == "--start")     forced_start = args[i + 1];
         if (args[i] == "--mode")      mode = args[i + 1];
+        if (args[i] == "--emit")      emit_path = args[i + 1];
         if (args[i] == "--lookahead") g_lookahead = std::stoi(std::string(args[i + 1]));
     }
 
@@ -292,7 +340,7 @@ int main(int argc, char** argv) {
 
     auto t0 = Clock::now();
     auto pm = PatternMatrix::build(*wl);
-    g_words = &*wl; g_pm = &pm;
+    g_words = &*wl; g_pm = &pm; g_max_depth = max_depth;
     std::println("words={} answers={} max_depth={}  (matrix {:.1f}s)",
         wl->size(), ans->size(), max_depth,
         std::chrono::duration<double>(Clock::now() - t0).count());
@@ -340,13 +388,54 @@ int main(int argc, char** argv) {
         double s = std::chrono::duration<double>(Clock::now() - t0).count();
         if (total >= TREE_INF) {
             std::println("TREE: infeasible at worst<={} ({:.1f}s)", max_depth, s);
-        } else {
-            double mean = static_cast<double>(total) / static_cast<double>(cand.size());
-            std::println("TREE: worst<={} total={} mean={:.4f} root={} "
-                "({} nodes, {:.1f}s)",
-                max_depth, total, mean,
-                root == WordList::NPOS ? "(searched)" : std::string((*wl)[root].view()),
-                g_nodes, s);
+            return 1;
+        }
+        double mean = static_cast<double>(total) / static_cast<double>(cand.size());
+        std::println("TREE: worst<={} total={} mean={:.4f} root={} ({} nodes, {:.1f}s)",
+            max_depth, total, mean,
+            root == WordList::NPOS ? "(searched)" : std::string((*wl)[root].view()),
+            g_nodes, s);
+
+        // ── Emit the tree to a database (+ binary) if requested ─────────────
+        if (!emit_path.empty()) {
+            std::error_code ec;
+            std::filesystem::remove(emit_path, ec);
+            std::filesystem::remove(emit_path + "-wal", ec);
+            std::filesystem::remove(emit_path + "-shm", ec);
+            auto db = Database::create(emit_path);
+            if (!db) { std::println(stderr, "create db: {}", db.error()); return 1; }
+            if (auto r = db->begin_transaction(); !r) { std::println(stderr, "{}", r.error()); return 1; }
+            uint32_t next_id = 0;
+            uint16_t root_guess = forced_start.empty() ? WordList::NPOS
+                                                       : wl->index_of(forced_start);
+            emit_tree(*db, cand, max_depth, next_id, root_guess);
+            if (auto r = db->commit_transaction(); !r) { std::println(stderr, "{}", r.error()); return 1; }
+
+            // Recompute true depths for metadata via the words list.
+            DbMetadata meta{
+                .words_source = "https://gist.github.com/SukkaW/92ff13af03a0117e5bafec6c7f7d6dce",
+                .words_date = "2026-06-09",
+                .answers_source = "curated answers (optimal worst<=5 tree)",
+                .strategy = std::format("optimal-worst{}-lookahead{}", max_depth, g_lookahead),
+                .start_word = std::string((*wl)[root_guess != WordList::NPOS ? root_guess
+                                          : tree_choice(cand, max_depth)].view()),
+                .worst_case_depth = max_depth,
+                .mean_depth = mean,
+                .total_nodes = static_cast<int>(next_id),
+                .total_words = static_cast<int>(wl->size()),
+                .total_answers = static_cast<int>(ans->size()),
+            };
+            if (auto r = db->finalize(meta); !r) { std::println(stderr, "{}", r.error()); return 1; }
+            // Binary export alongside.
+            auto dot = emit_path.find_last_of('.');
+            std::string bin = (dot == std::string::npos ? emit_path
+                                                        : emit_path.substr(0, dot)) + ".bin";
+            if (auto r = BinaryDb::export_from(*db, meta, bin); !r)
+                std::println(stderr, "binary export: {}", r.error());
+            db = std::unexpected(std::string{});
+            std::filesystem::remove(emit_path + "-wal", ec);
+            std::filesystem::remove(emit_path + "-shm", ec);
+            std::println("emitted DB to {} (+ {})", emit_path, bin);
         }
         return 0;
     }

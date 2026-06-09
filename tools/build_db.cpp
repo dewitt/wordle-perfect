@@ -70,6 +70,8 @@ struct TreeBuilder {
     int                     target_depth{6};  // worst-case depth we try to hit
     int                     min_escalation_depth{2};  // don't escalate above this
     std::size_t             beam_width{EntropySolver::DEFAULT_BEAM_WIDTH};
+    bool                    optimal_mode{false};  // feasibility-constrained (worst<=target)
+    std::size_t             optimal_lookahead{1};
 
     uint32_t next_id{0};
     uint64_t nodes_written{0};
@@ -79,10 +81,12 @@ struct TreeBuilder {
     TreeBuilder(const WordList& w, const PatternMatrix& p, Database& d, unsigned t,
                 EntropySolver::WeightFn wf = {}, uint16_t fixed_root = WordList::NPOS,
                 int target_depth = 6, int min_escalation_depth = 2,
-                std::size_t beam_width = EntropySolver::DEFAULT_BEAM_WIDTH)
+                std::size_t beam_width = EntropySolver::DEFAULT_BEAM_WIDTH,
+                bool optimal_mode = false, std::size_t optimal_lookahead = 1)
         : words{w}, pm{p}, db{d}, solver{w, p, wf}, nthreads{t}, weight_fn{wf},
           fixed_root{fixed_root}, target_depth{target_depth},
-          min_escalation_depth{min_escalation_depth}, beam_width{beam_width} {}
+          min_escalation_depth{min_escalation_depth}, beam_width{beam_width},
+          optimal_mode{optimal_mode}, optimal_lookahead{optimal_lookahead} {}
 
     // Entry point: build the entire tree wrapped in a single transaction.
     uint32_t build() {
@@ -107,7 +111,22 @@ private:
         // depth-6 paths that greedy entropy leaves behind for repeated-letter
         // trap families (cover, rover, roger, etc.).
         uint16_t guess_idx;
-        if (depth == 1 && fixed_root != WordList::NPOS) {
+        if (optimal_mode) {
+            // Feasibility-constrained selection: guarantees worst-case <= target_depth
+            // while minimising mean via entropy + lookahead. The root honours a
+            // forced start if it keeps the set feasible.
+            const int budget = std::max(1, target_depth + 1 - depth);
+            if (depth == 1 && fixed_root != WordList::NPOS) {
+                guess_idx = fixed_root;
+            } else {
+                guess_idx = solver.best_guess_feasible(candidates, budget,
+                                                       optimal_lookahead);
+                if (guess_idx == WordList::NPOS)
+                    die(std::format("optimal: no feasible guess at depth {} for "
+                                    "{} candidates (target_depth too low?)",
+                                    depth, candidates.size()));
+            }
+        } else if (depth == 1 && fixed_root != WordList::NPOS) {
             guess_idx = fixed_root;   // forced start word
         } else if (depth == 1) {
             // Parallelise the expensive root search (the O(N²) hot spot).
@@ -143,6 +162,8 @@ private:
         auto r = db.insert_node(my_id, guess_idx, static_cast<uint8_t>(depth));
         if (!r) die(r.error());
         ++nodes_written;
+        if (optimal_mode && nodes_written % 1000 == 0)
+            std::println(stderr, "[optimal] {} nodes written...", nodes_written);
         if (depth > max_depth_seen) max_depth_seen = depth;
 
         // Partition candidates by pattern against this guess
@@ -253,16 +274,35 @@ int main(int argc, char** argv) {
     int min_escalation_depth = 2;
     std::size_t beam_width = EntropySolver::DEFAULT_BEAM_WIDTH;
 
+    // --optimal: feasibility-constrained construction guaranteeing worst-case
+    // <= target_depth (default 5 in this mode) with a much lower mean. --lookahead
+    // widens the per-node search for a better mean (slower).
+    bool optimal_mode = [&args]() {
+        auto it = std::ranges::find(args, std::string_view{"--optimal"});
+        if (it == args.end()) return false;
+        args.erase(it);
+        return true;
+    }();
+    std::size_t optimal_lookahead = 1;
+    bool target_depth_explicit = false;
+
     if (auto v = consume("--words");         !v.empty()) words_path           = v;
     if (auto v = consume("--answers");       !v.empty()) answers_explicit     = std::string(v);
     if (auto v = consume("--output");        !v.empty()) out_path             = v;
     if (auto v = consume("--strategy");      !v.empty()) strategy             = v;
     if (auto v = consume("--start-word");    !v.empty()) start_word           = v;
     if (auto v = consume("--date");          !v.empty()) words_date_override  = v;
-    if (auto v = consume("--target-depth");  !v.empty()) target_depth = std::stoi(std::string(v));
+    if (auto v = consume("--target-depth");  !v.empty()) { target_depth = std::stoi(std::string(v)); target_depth_explicit = true; }
     if (auto v = consume("--min-escalation-depth"); !v.empty()) min_escalation_depth = std::stoi(std::string(v));
     if (auto v = consume("--beam-width"); !v.empty()) beam_width = static_cast<std::size_t>(std::stoul(std::string(v)));
+    if (auto v = consume("--lookahead"); !v.empty()) optimal_lookahead = static_cast<std::size_t>(std::stoul(std::string(v)));
     if (auto v = consume("--answer-weight"); !v.empty()) answer_weight = std::stod(std::string(v));
+
+    // In optimal mode, default the worst-case target to the proven optimum (5)
+    // unless the user overrode --target-depth.
+    if (optimal_mode && !target_depth_explicit) target_depth = 5;
+    if (optimal_mode && strategy.starts_with("answer-weighted"))
+        strategy = std::format("optimal-w{}-l{}", target_depth, optimal_lookahead);
 
     // Binary export: default to <output>.bin; --binary <path> overrides;
     // --no-binary disables. The flat mmap format gives true O(1) lookup.
@@ -365,7 +405,8 @@ int main(int argc, char** argv) {
     t0 = Clock::now();
 
     TreeBuilder builder{*wl, pm, *db, nthreads, weight_fn, fixed_root,
-                        target_depth, min_escalation_depth, beam_width};
+                        target_depth, min_escalation_depth, beam_width,
+                        optimal_mode, optimal_lookahead};
     builder.build();
 
     std::println("tree built in {:.1f}s  ({} nodes, max depth {})",
