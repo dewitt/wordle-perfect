@@ -50,6 +50,10 @@ target_link_libraries(wordle PRIVATE wordle_core)
 add_executable(build_db tools/build_db.cpp)
 target_link_libraries(build_db PRIVATE wordle_core)
 
+# ── Experimental optimal-tree search (issue #8 research) ──────────────────────
+add_executable(optimal tools/optimal.cpp)
+target_link_libraries(optimal PRIVATE wordle_core)
+
 # ── Tests ─────────────────────────────────────────────────────────────────────
 enable_testing()
 find_package(Catch2 3 REQUIRED)
