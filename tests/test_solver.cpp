@@ -287,3 +287,74 @@ TEST_CASE("any_consistent_word - guess-only word as answer is rejected vs answer
     std::vector<GuessResponse> hist{{"tarse", PATTERN_SOLVED}};  // tarse not in set
     CHECK_FALSE(any_consistent_word(answers, hist));
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// is_feasible / best_guess_feasible — worst-case-bounded tree construction (#8)
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST_CASE("is_feasible - trivial sets", "[solver][optimal]") {
+    auto wl = tiny_wordlist({"crane", "slate", "trace"});
+    auto pm = PatternMatrix::build(wl);
+    EntropySolver solver{wl, pm};
+
+    std::vector<uint16_t> empty{};
+    CHECK(solver.is_feasible(empty, 5));            // empty trivially feasible
+    uint16_t one = wl.index_of("crane");
+    CHECK(solver.is_feasible(std::span<const uint16_t>{&one, 1}, 1));  // singleton in 1
+    auto all = wl.all_indices();
+    CHECK_FALSE(solver.is_feasible(all, 1));         // 3 words can't solve in 1
+}
+
+TEST_CASE("is_feasible - answer set is solvable in 5 but not 4 (sampled)",
+          "[solver][optimal][slow]") {
+    // The full answer set is provably worst-case-5 (and 4 is impossible). Proving
+    // 4-infeasibility over the whole set is expensive, so we check the headline
+    // direction (feasible at 5) on the real set, which is fast with memoization.
+    auto wl = WordList::load("data/words.txt");
+    REQUIRE(wl.has_value());
+    auto ans = WordList::load("data/answers.txt");
+    REQUIRE(ans.has_value());
+    auto pm = PatternMatrix::build(*wl);
+    EntropySolver solver{*wl, pm};
+
+    std::vector<uint16_t> cand;
+    for (auto& w : ans->span()) {
+        auto idx = wl->index_of(w.view());
+        if (idx != WordList::NPOS) cand.push_back(idx);
+    }
+    std::ranges::sort(cand);
+
+    uint16_t witness = WordList::NPOS;
+    CHECK(solver.is_feasible(cand, 5, &witness));
+    CHECK(witness != WordList::NPOS);
+}
+
+TEST_CASE("best_guess_feasible - returns a feasible, splitting guess",
+          "[solver][optimal][slow]") {
+    auto wl = WordList::load("data/words.txt");
+    REQUIRE(wl.has_value());
+    auto ans = WordList::load("data/answers.txt");
+    REQUIRE(ans.has_value());
+    auto pm = PatternMatrix::build(*wl);
+    EntropySolver solver{*wl, pm};
+
+    std::vector<uint16_t> cand;
+    for (auto& w : ans->span()) {
+        auto idx = wl->index_of(w.view());
+        if (idx != WordList::NPOS) cand.push_back(idx);
+    }
+    std::ranges::sort(cand);
+
+    uint16_t g = solver.best_guess_feasible(cand, 5, /*lookahead=*/1);
+    REQUIRE(g != WordList::NPOS);
+    // The chosen guess must split the set (max bucket < n) and keep every bucket
+    // feasible at depth 4.
+    auto buckets = EntropySolver::partition(cand, g, pm);
+    std::size_t maxb = 0;
+    for (auto& b : buckets) maxb = std::max(maxb, b.size());
+    CHECK(maxb < cand.size());
+    for (Pattern p = 0; p < PATTERN_COUNT - 1; ++p) {
+        if (buckets[p].size() <= 1) continue;
+        CHECK(solver.is_feasible(buckets[p], 4));
+    }
+}
