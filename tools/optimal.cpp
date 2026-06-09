@@ -225,15 +225,18 @@ uint16_t tree_choice(const std::vector<uint16_t>& cand, int depth) {
 uint32_t emit_tree(Database& db, const std::vector<uint16_t>& cand, int depth,
                    uint32_t& next_id, uint16_t forced_guess = WordList::NPOS) {
     const uint32_t id = next_id++;
+    const int n = static_cast<int>(cand.size());
+    if (depth <= 0) {
+        std::println(stderr, "emit: depth exhausted for set size {}", n);
+        std::exit(1);
+    }
     uint16_t guess = (forced_guess != WordList::NPOS) ? forced_guess
                                                       : tree_choice(cand, depth);
     if (guess == WordList::NPOS) {
         std::println(stderr, "emit: no choice for set of size {} at depth {}",
-            cand.size(), depth);
+            n, depth);
         std::exit(1);
     }
-    // node round-depth = (max_depth - remaining_budget + 1); g_max_depth holds
-    // the configured worst-case bound.
     const uint8_t round = static_cast<uint8_t>(g_max_depth - depth + 1);
     if (auto r = db.insert_node(id, guess, round); !r) { std::println(stderr, "{}", r.error()); std::exit(1); }
 
@@ -243,6 +246,12 @@ uint32_t emit_tree(Database& db, const std::vector<uint16_t>& cand, int depth,
         if (p == PATTERN_SOLVED) continue;
         auto& b = buckets[p];
         if (b.empty()) continue;
+        // Guard against a non-splitting choice causing infinite recursion.
+        if (static_cast<int>(b.size()) == n) {
+            std::println(stderr, "emit: guess {} did not split set size {} "
+                "(bucket {}) at depth {}", (*g_words)[guess].view(), n, p, depth);
+            std::exit(1);
+        }
         uint32_t child = emit_tree(db, b, depth - 1, next_id);
         if (auto r = db.insert_edge(id, p, child); !r) { std::println(stderr, "{}", r.error()); std::exit(1); }
     }
