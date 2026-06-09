@@ -203,6 +203,17 @@ public:
                     int budget,
                     std::size_t beam_width) const;
 
+    // Total depth (Σ over candidates, direct hit = 1) of the feasibility-
+    // constrained entropy-greedy tree when the first guess is fixed to `opener`,
+    // under a worst-case cap of `budget`. Returns INT_MAX if `opener` cannot
+    // keep the set solvable within `budget`. Used by the parallel opener sweep
+    // in the exact solver (issue #27). Each thread should use its own
+    // EntropySolver instance (the feasibility memo is per-instance, not shared).
+    [[nodiscard]] int
+    tree_total_for_opener(std::span<const uint16_t> candidates,
+                          uint16_t opener, int budget,
+                          std::size_t lookahead = 1) const;
+
     // Solve for a known target word, returning the full step sequence.
     // answer_idx must be a valid index into the WordList.
     // max_rounds caps the search; defaults to DEFAULT_MAX_ROUNDS (6).

@@ -54,6 +54,10 @@ target_link_libraries(build_db PRIVATE wordle_core)
 add_executable(optimal tools/optimal.cpp)
 target_link_libraries(optimal PRIVATE wordle_core)
 
+# ── Parallel exact optimal solver (issue #27) ─────────────────────────────────
+add_executable(exact tools/exact.cpp)
+target_link_libraries(exact PRIVATE wordle_core)
+
 # ── Tests ─────────────────────────────────────────────────────────────────────
 enable_testing()
 find_package(Catch2 3 REQUIRED)

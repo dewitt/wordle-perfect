@@ -651,6 +651,42 @@ int EntropySolver::feasible_total(std::span<const uint16_t> candidates,
     return total;
 }
 
+int EntropySolver::tree_total_for_opener(std::span<const uint16_t> candidates,
+                                         uint16_t opener, int budget,
+                                         std::size_t lookahead) const {
+    const int n = static_cast<int>(candidates.size());
+    if (n == 0) return 0;
+    if (budget <= 0) return std::numeric_limits<int>::max();
+
+    auto buckets = partition(candidates, opener, patterns_);
+    // The opener must keep every non-trivial bucket feasible within budget-1.
+    for (Pattern p = 0; p < PATTERN_COUNT; ++p) {
+        if (p == PATTERN_SOLVED) continue;
+        auto& b = buckets[p];
+        if (b.size() <= 1) continue;
+        if (!is_feasible(b, budget - 1, nullptr))
+            return std::numeric_limits<int>::max();
+    }
+    // Accumulate total via the feasibility-constrained policy (lookahead-aware
+    // when > 1; lookahead 1 uses the cheap greedy continuation).
+    int total = n;
+    for (Pattern p = 0; p < PATTERN_COUNT; ++p) {
+        if (p == PATTERN_SOLVED) continue;
+        auto& b = buckets[p];
+        if (b.empty()) continue;
+        if (b.size() == 1) { total += 1; continue; }
+        if (lookahead > 1) {
+            // descend choosing best_guess_feasible with lookahead at each node
+            uint16_t g = best_guess_feasible(b, budget - 1, lookahead);
+            if (g == WordList::NPOS) return std::numeric_limits<int>::max();
+            total += tree_total_for_opener(b, g, budget - 1, lookahead);
+        } else {
+            total += feasible_total(b, budget - 1);
+        }
+    }
+    return total;
+}
+
 uint16_t EntropySolver::best_guess_feasible(std::span<const uint16_t> candidates,
                                             int budget,
                                             std::size_t lookahead) const {
