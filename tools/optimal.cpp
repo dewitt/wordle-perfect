@@ -143,6 +143,10 @@ double entropy_of(const std::vector<uint16_t>& cand, uint16_t gi) {
 }
 
 constexpr int TREE_INF = 1'000'000'000;
+int g_lookahead = 1;  // how many top-entropy feasible guesses to expand per node
+
+// Memo for tree_total: many sub-candidate-sets recur. Key on (set, depth).
+std::unordered_map<std::uint64_t, int> g_tree;
 
 int tree_total(const std::vector<uint16_t>& cand, int depth) {
     const int n = static_cast<int>(cand.size());
@@ -150,8 +154,10 @@ int tree_total(const std::vector<uint16_t>& cand, int depth) {
     if (n == 1) return 1;
     if (depth <= 1) return TREE_INF;
 
-    // Rank guesses by entropy desc (best mean first); among them choose the
-    // first that is fully feasible at depth-1.
+    const std::uint64_t key = hash_key(cand, depth) ^ 0x7EE5u;
+    if (auto it = g_tree.find(key); it != g_tree.end()) return it->second;
+
+    // Rank guesses by entropy desc (best mean first).
     const std::size_t W = g_words->size();
     std::vector<std::pair<double, uint16_t>> order;
     order.reserve(W);
@@ -166,10 +172,13 @@ int tree_total(const std::vector<uint16_t>& cand, int depth) {
         return a.second < b.second;
     });
 
+    int best = TREE_INF;
+    int expanded = 0;
     for (auto& [H, gi] : order) {
+        if (expanded >= g_lookahead) break;
         std::vector<std::vector<uint16_t>> buckets(PATTERN_COUNT);
         for (uint16_t ai : cand) buckets[g_pm->get(gi, ai)].push_back(ai);
-        // Check feasibility of all buckets at depth-1 first (cheap, memoized).
+        // Feasibility gate (cheap, memoized): every bucket solvable in depth-1.
         bool ok = true;
         for (Pattern p = 0; p < PATTERN_COUNT && ok; ++p) {
             if (p == PATTERN_SOLVED) continue;
@@ -178,18 +187,20 @@ int tree_total(const std::vector<uint16_t>& cand, int depth) {
             uint16_t dummy;
             if (!feasible(b, depth - 1, &dummy)) ok = false;
         }
-        if (!ok) continue;
-        // Feasible: accumulate the real total by recursing with the SAME policy.
+        if (!ok) continue;            // not feasible — doesn't count toward lookahead
+        ++expanded;
+        // Accumulate the real total recursively under the same policy.
         int total = n;
-        for (Pattern p = 0; p < PATTERN_COUNT; ++p) {
+        for (Pattern p = 0; p < PATTERN_COUNT && total < best; ++p) {
             if (p == PATTERN_SOLVED) continue;
             auto& b = buckets[p];
             if (b.empty()) continue;
             total += (b.size() == 1) ? 1 : tree_total(b, depth - 1);
         }
-        return total;
+        best = std::min(best, total);
     }
-    return TREE_INF;  // no feasible guess (shouldn't happen if cand feasible)
+    g_tree[key] = best;
+    return best;
 }
 
 // ── mean (total-depth) optimization, subject to worst<=depth ────────────────
@@ -271,6 +282,7 @@ int main(int argc, char** argv) {
         if (args[i] == "--max-depth") max_depth = std::stoi(std::string(args[i + 1]));
         if (args[i] == "--start")     forced_start = args[i + 1];
         if (args[i] == "--mode")      mode = args[i + 1];
+        if (args[i] == "--lookahead") g_lookahead = std::stoi(std::string(args[i + 1]));
     }
 
     auto wl = WordList::load(words_path);
