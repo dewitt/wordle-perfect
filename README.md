@@ -2,39 +2,48 @@
 
 A Wordle solver built on precomputed, O(1)-lookup decision trees.
 
-The system hillclimbs toward the best-known solution tree — minimizing worst-case solve depth first, then average solve depth — across the full set of valid Wordle words. Precomputed paths are stored so that each guess in a solve requires exactly one O(1) lookup with no runtime search: SQLite is the build-time format, and a flat `mmap`-able binary (`.bin`) is the dependency-free runtime format. The CLI auto-detects which it's given.
+The solver computes a **provably worst-case-optimal** decision tree — every one of the 2,355 curated NYT answers is solved in **at most 5 guesses** (it is mathematically impossible to guarantee 4), with a mean of **3.5495**. Among trees that hit the optimal worst case, it minimizes average depth via a feasibility-constrained, entropy-guided search with bounded lookahead. Precomputed paths are stored so that each guess in a solve requires exactly one O(1) lookup with no runtime search: SQLite is the build-time format, and a flat `mmap`-able binary (`.bin`) is the dependency-free runtime format. The CLI auto-detects which it's given.
 
 ## Current results
 
 Two precomputed databases are available. The standard DB is the default; the full-coverage DB is an optional fallback for resilience against future answer-list expansions.
 
-### Standard database (`wordle.db`) — 2,355 curated answers
+### Optimal database (`wordle.db`) — 2,355 curated answers, worst-case 5
 
 | Metric | Value |
 |--------|-------|
-| Start word | **tarse** (auto-selected) |
+| Start word | **trace** |
 | Answers covered | 2,355 (all known NYT answer words) |
-| Worst case | **6 guesses** |
-| Mean depth | **3.8144 guesses** |
-| Strategy | `answer-weighted-beam-v3` |
-| Per-query latency | O(1) lookup; mmap'd binary DB (`wordle.bin`, ~265 KB) or SQLite (`wordle.db`, ~455 KB) |
+| Worst case | **5 guesses** (provably optimal — 4 is impossible) |
+| Mean depth | **3.5495 guesses** |
+| Strategy | `optimal-worst5-lookahead30` |
+| Per-query latency | O(1) lookup; mmap'd binary DB (`wordle.bin`) or SQLite (`wordle.db`) |
 
 Distribution:
 
 ```
-2 guesses:    11
-3 guesses:   672
-4 guesses:  1420
-5 guesses:   247
-6 guesses:     5
+1 guess :     1
+2 guesses:    38
+3 guesses:  1056
+4 guesses:  1186
+5 guesses:    74
 ```
 
-The 5 six-guess words (boxer, bunny, fuzzy, joker, rover) are the residue left
-after the budget-aware beam re-search (see Architecture). They are not claimed
-to be globally unavoidable — only that, from the auto-selected `tarse` opening,
-the greedy + beam optimizer finds no shorter path within practical compute. A
-worst-case-5 tree for the answer set is known to exist under exhaustive
-depth-first minimax, which is future work (see issue #8).
+Every answer is solved in **at most 5 guesses** — matching the proven optimum for
+the curated answer set (it is mathematically impossible to guarantee 4 or fewer).
+The tree is produced by a feasibility-constrained DFS minimax: at each node it
+takes the highest-entropy guess (low mean) among those that keep every branch
+solvable within the remaining depth, with a bounded lookahead to lower the mean.
+The mean (3.5495) can be pushed toward the ~3.42 theoretical optimum with a wider
+lookahead at higher build cost (see issue #8). Build it with:
+
+```sh
+./build/optimal --mode tree --start trace --max-depth 5 --lookahead 30 --emit wordle.db
+```
+
+The earlier answer-weighted entropy/beam strategy (`answer-weighted-beam-v3`,
+`build_db`) reaches worst-case 6 / mean 3.8144 and remains available; the optimal
+tree above supersedes it.
 
 ### Full-coverage database (`wordle-full.db`) — all 14,855 guess words
 
@@ -60,7 +69,10 @@ nix develop        # or: direnv allow
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 
-# Precompute the standard decision tree (~2 min, 2,355 curated answers)
+# Precompute the OPTIMAL worst-case-5 tree (~1.5 min, mean 3.5495)
+./build/optimal --mode tree --start trace --max-depth 5 --lookahead 30 --emit wordle.db
+
+# (alternative) answer-weighted entropy/beam tree, worst-case 6 (~2 min)
 ./build/build_db --output wordle.db
 
 # Precompute the full-coverage tree (~1 min, all 14,855 guess words as answers)
@@ -70,7 +82,7 @@ cmake --build build
 ## Testing
 
 ```sh
-# Run the full test suite (59 tests, ~4s)
+# Run the full test suite (62 tests, ~4s)
 ctest --test-dir build --output-on-failure
 
 # Or run the test binary directly for more verbose output
@@ -109,7 +121,8 @@ All commands accept `--db <path>` (default: `wordle.db`), `--words <path>` (defa
 
 - **Pattern matrix** — precomputed N×N table of Wordle response patterns (220M entries, ~210 MB in memory, built in ~0.5s using all CPU cores). Allows all partition and entropy computations to be pure memory accesses.
 - **EntropySolver** — dynamic solver used during precomputation. At each node, picks the guess maximising weighted Shannon entropy over the remaining candidate set. Answer-list words are weighted 1000× to bias the tree toward better performance on likely answers.
-- **Budget-aware escalation** — the build work-horse (`best_guess_within_budget`). It takes the fast greedy guess unless that guess's worst-case continuation would exceed the remaining depth budget. Only then does it escalate:
+- **Optimal worst-5 builder** (`optimal --mode tree`, `src/solver.cpp` `is_feasible`/`best_guess_feasible`) — the headline result. A DFS minimax over the answer set establishes which candidate sets are solvable within a depth bound (memoized on the sorted candidate set, guesses ordered by max-bucket-size for hard alpha-beta pruning). The tree builder then, at each node, picks the **highest-entropy guess among those that keep every branch feasible** within the remaining depth, with a bounded `--lookahead` that expands the top-N feasible guesses and keeps the lowest-mean subtree. This guarantees worst-case 5 (the proven optimum) while driving the mean toward optimal. Emit a DB with `optimal ... --emit`.
+- **Budget-aware escalation** — the legacy `build_db` work-horse (`best_guess_within_budget`). It takes the fast greedy guess unless that guess's worst-case continuation would exceed the remaining depth budget. Only then does it escalate:
   - **small candidate sets (≤ 64):** full alpha-beta **minimax**, seeded by the greedy worst-depth for tight pruning, sub-calls restricted to the candidate pool (O(K^depth)).
   - **large candidate sets:** a **beam re-search** that probes the top-24 entropy guesses with a pruned greedy worst-depth evaluator. Unlike minimax this never iterates the whole vocabulary, so it stays tractable and can attack the repeated-letter trap clusters that form high in the tree. This is what reduced the depth-6 residue from 6 words to 5 and improved the mean.
  - **build_db** — precomputation pipeline. Builds the full decision tree depth-first and writes it to SQLite in a single transaction, then exports a flat binary alongside it (`<output>.bin`; disable with `--no-binary`). Root guess is found in parallel; all other nodes are single-threaded. Tunable via `--target-depth`, `--min-escalation-depth`, `--beam-width`, `--start-word`, `--answer-weight`, `--date`, and `--binary`.

@@ -28,20 +28,27 @@ A Wordle solver that precomputes the best-known decision tree over all valid Wor
 - [x] Minimax optimizer — alpha-beta for small candidate sets (≤64); seeded by greedy for pruning
 - [x] Beam re-search — top-N entropy probe for large candidate sets where minimax is intractable (`best_guess_beam`)
 - [x] Budget-aware escalation — `best_guess_within_budget`: greedy unless it blows the depth budget, then minimax (small) or beam (large)
-- [x] Precomputation pipeline — `build_db` tool; builds SQLite decision tree (~2 min standard, ~1 min full)
+- [x] **Optimal worst-case-5 tree (issue #8)** — `tools/optimal.cpp` + `EntropySolver::is_feasible`/`best_guess_feasible`: DFS minimax (memoized on the candidate set) proves the answer set is solvable in worst-case 5 (the proven optimum); feasibility-constrained entropy-greedy + `--lookahead` minimises mean. `optimal --emit` writes a verified worst-5 DB. trace/lookahead-30 → worst 5, mean 3.5495.
+- [x] Precomputation pipeline — `build_db` tool (legacy entropy/beam, worst 6); `optimal` tool (worst-5 optimal). SQLite decision tree (~1–2 min)
 - [x] CLI tool — `wordle` binary; `solve`, `play`, `eval`, `info`, `dump` modes
 - [x] Database integrity — FNV-1a checksum on every open
 - [x] Binary DB format — flat mmap'd `.bin` (`src/binarydb.*`) for true O(1) lookup; `build_db` exports it alongside the SQLite file; CLI auto-detects format. ~42% smaller, ~2× faster, no runtime SQLite dep
 - [x] Hillclimbing — answer-weighted entropy (1000×), minimax, beam, alternative start words
-- [x] Test suite — Catch2 v3, 59 tests, `ctest` in ~4s (pattern, wordlist, solver incl. minimax + consistency, database incl. walk_target + real-corruption + e2e, binarydb incl. SQLite-parity + dump)
+- [x] Test suite — Catch2 v3, 62 tests, `ctest` in ~4s (pattern, wordlist, solver incl. minimax + consistency + feasibility, database incl. walk_target + real-corruption + e2e, binarydb incl. SQLite-parity + dump)
 - [x] Code quality — `DEPTH_IMPOSSIBLE` constant, cached DB statements, uint16_t overflow guard, shared `walk_target`, mtime-derived words_date, mode_solve answers validation, FNV hash correctness
 - [x] Full-coverage build mode — `build_db --full` builds `wordle-full.db` covering all 14,855 guess words (worst-case depth 8, 0 failures)
 
-**Latest database results (answer-weighted-beam-v3, start word: tarse):**
-- Worst case: 6 guesses (all 2,355 answers solved)
-- Mean depth: 3.8144 guesses
-- Distribution: 0×1, 11×2, 672×3, 1420×4, 247×5, 5×6
-- Database: 16,521 nodes (SQLite `wordle.db` ~455 KB; binary `wordle.bin` ~265 KB)
+**OPTIMAL database results (optimal-worst5-lookahead30, start word: trace):**
+- Worst case: **5 guesses** — the proven optimum for the curated answer set (4 is impossible). All 2,355 answers solved, 0 failures.
+- Mean depth: **3.5495 guesses**
+- Distribution: 1×1, 38×2, 1056×3, 1186×4, 74×5 (zero 6+)
+- 2,778 nodes; built by `optimal --mode tree --start trace --max-depth 5 --lookahead 30 --emit` in ~1.5 min
+- Verified independently by the production CLI `eval` (and SQLite==binary parity)
+- Build the optimal tree with the `optimal` tool, NOT `build_db` (whose entropy/beam path tops out at worst 6).
+
+**Legacy database results (answer-weighted-beam-v3, start word: tarse):**
+- Worst case 6, mean 3.8144; distribution 0×1, 11×2, 672×3, 1420×4, 247×5, 5×6; 16,521 nodes
+- Still produced by `build_db`; superseded by the optimal worst-5 tree above.
 - Answers source: cfreshman/a03ef2cba789d8cf00c08f767e0fad7b (original embed) + 40 post-acquisition NYT additions from eithan/wordlelist
 
 **Hillclimbing findings:**
@@ -67,7 +74,7 @@ A Wordle solver that precomputes the best-known decision tree over all valid Wor
 ## Known limitations
 
 - **`EvalResult::dist` is capped at depth 15** in `build_db.cpp`. Words solved at depth ≥ 16 would appear as failures. The current worst case is 8, so this is not a practical concern. (The CLI `eval` mode uses the shared `walk_target` with `WALK_DEPTH_CAP = 16` and reports true depths rather than capping at the DB's worst-case metric — issue #9, fixed.)
-- **Worst-case is 6, not 5** for the standard answer set. Greedy + beam from the auto-selected `tarse` opener cannot reach the known worst-case-5 tree; that needs exhaustive depth-first minimax over the answer set (issue #8, open).
+- **Mean depth (3.5495) is above the ~3.42 theoretical optimum.** The worst-case-5 result is optimal, but the feasibility-constrained entropy-greedy + bounded-lookahead policy doesn't fully minimise the mean (exact mean-optimal DP over the full vocabulary is much more expensive). Wider `--lookahead` closes the gap (e.g. trace/lookahead-60 → 3.5393) at higher build cost. Closing to ~3.42 is remaining work on issue #8.
 
 See the open GitHub issues for the remaining backlog from the code review — notably the SIMD/bitmask pattern path (#12, open) and the worst-case-5 exhaustive minimax (#8, open). The flat mmap'd binary DB (#13) is now implemented.
 
@@ -84,10 +91,11 @@ See the open GitHub issues for the remaining backlog from the code review — no
 | `CLAUDE.md` | This file |
 | `src/pattern.hpp/cpp` | Wordle pattern computation (G/Y/B encoding, 243 patterns) |
 | `src/wordlist.hpp/cpp` | Sorted word list with O(log N) lookup; rejects lists > 65,535 entries |
-| `src/solver.hpp/cpp` | `EntropySolver`: weighted entropy, minimax, beam re-search, `best_guess_within_budget`; `DEPTH_IMPOSSIBLE` sentinel |
+| `src/solver.hpp/cpp` | `EntropySolver`: weighted entropy, minimax, beam re-search, `best_guess_within_budget`, `is_feasible`/`best_guess_feasible` (optimal worst-5); `DEPTH_IMPOSSIBLE` sentinel |
 | `src/database.hpp/cpp` | SQLite decision tree + templated `walk_target` helper + bulk `all_nodes`/`all_edges` export (read/write, checksum, metadata, cached hot-path stmts) |
 | `src/binarydb.hpp/cpp` | Flat mmap'd `.bin` decision tree (`BinaryDb`): header+checksum, direct-indexed nodes, CSR pattern-sorted edges; `export_from(Database)` + read-only mmap lookup |
-| `tools/build_db.cpp` | Precomputation pipeline; budget-aware escalation; exports SQLite + binary; flags incl. `--full`, `--target-depth`, `--min-escalation-depth`, `--beam-width`, `--date`, `--binary`, `--no-binary` |
+| `tools/build_db.cpp` | Legacy precomputation pipeline (entropy/beam, worst 6); budget-aware escalation; exports SQLite + binary; flags incl. `--full`, `--target-depth`, `--min-escalation-depth`, `--beam-width`, `--date`, `--binary`, `--no-binary` |
+| `tools/optimal.cpp` | **Optimal worst-5 builder** — DFS minimax feasibility + entropy-greedy with `--lookahead`; `--mode tree --emit` writes a verified worst-5 DB (+ binary) |
 | `src/main.cpp` | CLI entry point (`solve`, `play`, `eval`, `info`, `dump`); validates solve targets vs answers list |
 | `data/words.txt` | 14,855 valid Wordle guesses (NYT, June 2026) |
 | `data/answers.txt` | 2,355 valid Wordle answers (NYT, June 2026; includes 40 post-acquisition additions) |
