@@ -45,17 +45,26 @@ The earlier answer-weighted entropy/beam strategy (`answer-weighted-beam-v3`,
 `build_db`) reaches worst-case 6 / mean 3.8144 and remains available; the optimal
 tree above supersedes it.
 
-### Full-coverage database (`wordle-full.db`) — all 14,855 guess words
+### Full-coverage database — all 14,855 guess words
 
-| Metric | Value |
-|--------|-------|
-| Start word | **tares** (auto-selected) |
-| Words covered | 14,855 (every valid guess word) |
-| Worst case | **8 guesses** (27 words need 7, 1 needs 8) |
-| Mean depth | **4.1280 guesses** |
-| Failures | **0** (all 14,855 words solved) |
+Two builds are available; the optimal one minimizes the worst case (the project's
+top priority), the legacy one minimizes the mean:
 
-The 28 previously-unsolvable words (coxed, waqfs, zills, etc.) are all obscure guess-list-only entries that have never been NYT answers.
+| Build | Start | Worst case | Mean | Notes |
+|-------|-------|-----------|------|-------|
+| **Optimal** (`optimal --answers data/words.txt --max-depth 7`) | tares | **7 guesses** | 4.2732 | 0 failures; zero 8-guess words; worst-case-optimal-leaning |
+| Legacy (`build_db --full`) | tares | 8 guesses | **4.1280** | 0 failures; lower mean, one 8-guess word |
+
+Optimal full distribution: 1×1, 41×2, 1679×3, 8003×4, 4490×5, 590×6, 51×7.
+
+Build the optimal full tree with:
+
+```sh
+./build/optimal --mode tree --answers data/words.txt --max-depth 7 --lookahead 1 --emit wordle-full.db
+```
+
+All deep words are obscure guess-list-only entries (coxed, waqfs, zills, …) that
+have never been NYT answers.
 
 ## Build
 

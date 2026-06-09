@@ -58,7 +58,9 @@ A Wordle solver that precomputes the best-known decision tree over all valid Wor
 - The budget-aware beam re-search (depth ≥ 2, width 24) reduced the depth-6 residue from 6 words to 5 and improved mean 3.8170 → 3.8144. The remaining 5 (boxer, bunny, fuzzy, joker, rover) are **not** claimed globally unavoidable — only that greedy+beam from tarse finds no shorter path within practical compute. A worst-case-5 answer-set tree is known to exist under exhaustive minimax (future work, issue #8).
 - Escalating at depth 2 is the dominant build cost (≈2× build time) but is required for the 6→5 improvement; `--min-escalation-depth 3` reverts to the faster 6-word result. Wider beams (48) gave no further gain.
 - Forced strong openers under greedy+beam did NOT beat tarse for worst-case (e.g. salet/target-depth-5 → 9×6); reaching worst=5 needs true depth-first minimax, not greedy.
-- Full-coverage DB (`wordle-full.db`, built with `--full`): worst-case 8, mean 4.1280, 16,543 nodes; all 14,855 words solved (27 in 7 guesses, 1 in 8); none of the deep words are in the curated answers set.
+- Full-coverage DB — two options:
+  - **Optimal worst-7** (`optimal --mode tree --answers data/words.txt --max-depth 7 --emit`): worst-case **7** (down from 8), mean 4.2732, 0 failures; distribution 1×1, 41×2, 1679×3, 8003×4, 4490×5, 590×6, 51×7 (zero 8s). Start `tares`, ~40s build, 18,701 nodes. By the project's worst-case-first priority this supersedes the entropy/beam full tree. Verified via the production CLI eval over all 14,855 words. Lookahead is impractically slow on the 14,855-candidate set, so mean is left at the lookahead-1 value (slightly above the entropy tree's 4.1280 — the cost of forcing worst≤7).
+  - **Legacy entropy/beam** (`build_db --full`): worst-case 8, mean 4.1280, 16,543 nodes; lower mean but a deeper worst case.
 
 **Architecture summary:**
 - Guess selection is driven by `EntropySolver::best_guess_within_budget`: take the greedy entropy guess, but if its greedy worst-case continuation would exceed the remaining depth budget, escalate.
