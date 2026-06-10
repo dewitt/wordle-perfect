@@ -167,20 +167,25 @@ private:
 // ---------------------------------------------------------------------------
 // Optimal builder: parallel feasibility-constrained opener sweep + emit.
 //
-// 1. Rank openers by entropy; sweep them in parallel (each worker has its own
-//    EntropySolver / private feasibility memo, so no lock contention) using
-//    tree_total_for_opener — the total depth of the worst-case-bounded tree.
+// 1. Rank openers by entropy; sweep the top `top` of them in parallel (each
+//    worker has its own EntropySolver / private feasibility memo, so no lock
+//    contention) using tree_total_for_opener at `sweep_lookahead` — kept cheap
+//    (default 1) because it runs once per candidate opener.
 // 2. Pick the opener with the lowest total (mean), or honour --start-word.
-// 3. Emit that opener's tree node-by-node via best_guess_feasible (the same
-//    policy the sweep measured; the warm memo makes emission fast).
+// 3. Emit that opener's tree node-by-node via best_guess_feasible at
+//    `emit_lookahead` — this runs only on the single chosen opener, so a higher
+//    value here refines the final mean without paying it across the whole sweep.
 //
-// Returns nodes_written via out-param; the DB transaction is managed here.
+// NOTE: the two lookaheads are deliberately separate. Using a high lookahead in
+// the sweep multiplies its cost by ~the lookahead and the opener count — a
+// 14,855-opener × lookahead-30 sweep is ~tens of hours. Keep the sweep at 1.
 // ---------------------------------------------------------------------------
 struct OptimalResult { uint16_t opener; std::uint64_t nodes; };
 
 OptimalResult build_optimal(const WordList& wl, const PatternMatrix& pm,
                             Database& db, const std::vector<uint16_t>& cand,
-                            int worst_cap, std::size_t lookahead, std::size_t top,
+                            int worst_cap, std::size_t sweep_lookahead,
+                            std::size_t emit_lookahead, std::size_t top,
                             uint16_t forced_root, unsigned nthreads) {
     const int n = static_cast<int>(cand.size());
 
@@ -200,7 +205,8 @@ OptimalResult build_optimal(const WordList& wl, const PatternMatrix& pm,
         });
         if (top > 0 && openers.size() > top) openers.resize(top);
 
-        std::println("  sweeping {} openers across {} threads...", openers.size(), nthreads);
+        std::println("  sweeping {} openers across {} threads (sweep lookahead {})...",
+            openers.size(), nthreads, sweep_lookahead);
         Progress prog{"  opener sweep", static_cast<std::uint64_t>(openers.size())};
 
         std::atomic<std::size_t> next{0};
@@ -215,7 +221,7 @@ OptimalResult build_optimal(const WordList& wl, const PatternMatrix& pm,
                 std::size_t i = next.fetch_add(1, std::memory_order_relaxed);
                 if (i >= openers.size()) return;
                 uint16_t gi = openers[i].second;
-                int total = solver.tree_total_for_opener(cand, gi, worst_cap, lookahead);
+                int total = solver.tree_total_for_opener(cand, gi, worst_cap, sweep_lookahead);
                 std::size_t d = done.fetch_add(1, std::memory_order_relaxed) + 1;
                 prog.update(d);
                 if (total != std::numeric_limits<int>::max()) {
@@ -239,7 +245,7 @@ OptimalResult build_optimal(const WordList& wl, const PatternMatrix& pm,
         std::println("  forced opener: {}", wl[opener].view());
     }
 
-    // ── Emit the chosen opener's tree ────────────────────────────────────────
+    // ── Emit the chosen opener's tree (emit_lookahead applied here only) ──────
     EntropySolver solver{wl, pm};
     if (auto r = db.begin_transaction(); !r) die(r.error());
     Progress prog{"  building tree", std::uint64_t{0}, "nodes"};
@@ -251,7 +257,7 @@ OptimalResult build_optimal(const WordList& wl, const PatternMatrix& pm,
         uint32_t id = next_id++;
         uint16_t guess = (forced != WordList::NPOS) ? forced
             : (set.size() == 1 ? set[0]
-               : solver.best_guess_feasible(set, budget, lookahead));
+               : solver.best_guess_feasible(set, budget, emit_lookahead));
         if (guess == WordList::NPOS)
             die(std::format("optimal: no feasible guess (set {}, budget {})",
                             set.size(), budget));
@@ -349,8 +355,14 @@ int main(int argc, char** argv) {
     double      answer_weight        = 1000.0;     // legacy only
     int         min_escalation_depth = 2;          // legacy only
     std::size_t beam_width           = EntropySolver::DEFAULT_BEAM_WIDTH;  // legacy only
-    std::size_t lookahead            = 30;         // optimal mean-refinement
-    std::size_t top                  = 0;          // optimal sweep cap (0 = all)
+    // Two independent lookaheads (see build_optimal): the sweep ranks openers
+    // cheaply (default 1, runs per-opener), the emit refines only the winner's
+    // tree (default 1; raise for a lower mean at modest cost). --top caps the
+    // sweep to the top-N entropy openers so the default build is ~1 min, not
+    // hours — the optimal opener is reliably near the top of the entropy ranking.
+    std::size_t emit_lookahead       = 1;          // --lookahead (winner only)
+    std::size_t sweep_lookahead      = 1;          // --sweep-lookahead (per opener)
+    std::size_t top                  = 50;         // --top (0 = all openers)
     int         target_depth         = 0;          // 0 = strategy default
     bool        target_depth_explicit = false;
 
@@ -364,8 +376,9 @@ int main(int argc, char** argv) {
     if (auto v = consume("--answer-weight"); !v.empty()) answer_weight = std::stod(std::string(v));
     if (auto v = consume("--min-escalation-depth"); !v.empty()) min_escalation_depth = std::stoi(std::string(v));
     if (auto v = consume("--beam-width");    !v.empty()) beam_width = std::stoul(std::string(v));
-    if (auto v = consume("--lookahead");     !v.empty()) lookahead  = std::stoul(std::string(v));
-    if (auto v = consume("--top");           !v.empty()) top        = std::stoul(std::string(v));
+    if (auto v = consume("--lookahead");       !v.empty()) emit_lookahead  = std::stoul(std::string(v));
+    if (auto v = consume("--sweep-lookahead"); !v.empty()) sweep_lookahead = std::stoul(std::string(v));
+    if (auto v = consume("--top");             !v.empty()) top             = std::stoul(std::string(v));
     if (auto v = consume("--target-depth");  !v.empty()) { target_depth = std::stoi(std::string(v)); target_depth_explicit = true; }
     if (auto v = consume("--jobs");          !v.empty()) {
         nthreads = static_cast<unsigned>(std::stoi(std::string(v)));
@@ -425,6 +438,13 @@ int main(int argc, char** argv) {
     }
     std::ranges::sort(answer_indices);
 
+    // For --full, the opener sweep over the 14,855-candidate set is very slow
+    // (each per-opener evaluation is heavy), and `tares` is the known-good
+    // worst-7 opener, so default to it unless the user forces another. The
+    // curated-answers build is cheap enough to always sweep.
+    if (start_word.empty() && full_mode && strategy == "optimal")
+        start_word = "tares";
+
     uint16_t fixed_root = WordList::NPOS;
     if (!start_word.empty()) {
         fixed_root = wl->index_of(start_word);
@@ -443,12 +463,13 @@ int main(int argc, char** argv) {
     t0 = Clock::now();
 
     if (strategy == "optimal") {
-        std::println("building decision tree (strategy=optimal, worst<={}, lookahead={}, {} threads)...",
-            target_depth, lookahead, nthreads);
+        std::println("building decision tree (strategy=optimal, worst<={}, emit-lookahead={}, {} threads)...",
+            target_depth, emit_lookahead, nthreads);
         auto res = build_optimal(*wl, pm, *db, answer_indices, target_depth,
-                                 lookahead, top, fixed_root, nthreads);
+                                 sweep_lookahead, emit_lookahead, top,
+                                 fixed_root, nthreads);
         nodes_written = res.nodes;
-        strategy_label = std::format("optimal-worst{}-lookahead{}", target_depth, lookahead);
+        strategy_label = std::format("optimal-worst{}-lookahead{}", target_depth, emit_lookahead);
     } else {  // legacy
         std::println("building decision tree (strategy=legacy, worst<={}, {} threads)...",
             target_depth, nthreads);
