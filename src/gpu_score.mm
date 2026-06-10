@@ -67,6 +67,51 @@ kernel void score_guesses(
     out[gid].max_bucket = maxb;
     out[gid].entropy    = H;
 }
+
+// Batched variant: score ALL guesses against MANY candidate sets in one
+// dispatch. Grid is 2D: x = guess (0..n), y = set (0..nsets). Candidate sets are
+// packed contiguously in `cand`, with `offsets[s]..offsets[s+1]` delimiting set
+// s. Output is row-major [set][guess]. This amortises dispatch latency across
+// the whole frontier of sets at a search level — the regime where per-set
+// dispatch would otherwise dominate.
+kernel void score_sets(
+    device const uchar*    pmT       [[buffer(0)]],  // N*N transposed matrix
+    device const uint16_t* cand      [[buffer(1)]],  // all sets' candidates packed
+    device const uint*     offsets   [[buffer(2)]],  // nsets+1 prefix offsets
+    constant uint&         n         [[buffer(3)]],  // matrix dimension N
+    device GuessScore*     out       [[buffer(4)]],  // [nsets * n] row-major
+    uint2                  gid       [[thread_position_in_grid]])
+{
+    const uint g = gid.x;     // guess
+    const uint s = gid.y;     // set
+    if (g >= n) return;
+
+    const uint begin = offsets[s];
+    const uint end   = offsets[s + 1];
+    const uint ncand = end - begin;
+
+    ushort hist[PATTERN_COUNT];
+    for (uint i = 0; i < PATTERN_COUNT; ++i) hist[i] = 0;
+
+    uint maxb = 0;
+    for (uint i = begin; i < end; ++i) {
+        uint a = (uint)cand[i];
+        uchar p = pmT[(ulong)a * (ulong)n + g];
+        ushort c = ++hist[p];
+        if (c > maxb) maxb = c;
+    }
+
+    float total = (float)ncand;
+    float H = 0.0f;
+    for (uint i = 0; i < PATTERN_COUNT; ++i) {
+        ushort c = hist[i];
+        if (c != 0) { float pr = (float)c / total; H -= pr * log2(pr); }
+    }
+
+    const ulong oidx = (ulong)s * (ulong)n + g;
+    out[oidx].max_bucket = maxb;
+    out[oidx].entropy    = H;
+}
 )METAL";
 
 }  // namespace
@@ -74,11 +119,12 @@ kernel void score_guesses(
 namespace wp {
 
 struct GpuScorerImpl {
-    id<MTLDevice>              device      = nil;
-    id<MTLCommandQueue>        queue       = nil;
-    id<MTLComputePipelineState> pipeline   = nil;
-    id<MTLBuffer>             pm_buf       = nil;  // N*N pattern matrix (shared)
-    std::uint32_t             n            = 0;
+    id<MTLDevice>              device        = nil;
+    id<MTLCommandQueue>        queue         = nil;
+    id<MTLComputePipelineState> pipeline     = nil;  // score_guesses (single set)
+    id<MTLComputePipelineState> pipeline_sets = nil; // score_sets (batched)
+    id<MTLBuffer>             pm_buf         = nil;  // N*N transposed matrix (shared)
+    std::uint32_t             n              = 0;
 };
 
 std::expected<GpuScorer, std::string>
@@ -106,6 +152,14 @@ GpuScorer::create(const Pattern* pattern_matrix, std::uint32_t n) {
             return std::unexpected(std::format("pipeline failed: {}",
                 err ? err.localizedDescription.UTF8String : "unknown"));
 
+        id<MTLFunction> fn_sets = [lib newFunctionWithName:@"score_sets"];
+        if (!fn_sets) return std::unexpected("score_sets kernel not found");
+        id<MTLComputePipelineState> pipe_sets =
+            [device newComputePipelineStateWithFunction:fn_sets error:&err];
+        if (!pipe_sets)
+            return std::unexpected(std::format("score_sets pipeline failed: {}",
+                err ? err.localizedDescription.UTF8String : "unknown"));
+
         // Upload the TRANSPOSED matrix (pmT[a*N+g]) so the kernel's per-guess
         // threads read coalesced. Allocate the device buffer, then transpose
         // directly into its shared-memory contents.
@@ -125,11 +179,12 @@ GpuScorer::create(const Pattern* pattern_matrix, std::uint32_t n) {
         }
 
         auto* impl = new GpuScorerImpl{};
-        impl->device   = device;
-        impl->queue    = [device newCommandQueue];
-        impl->pipeline = pipe;
-        impl->pm_buf   = pm_buf;
-        impl->n        = n;
+        impl->device        = device;
+        impl->queue         = [device newCommandQueue];
+        impl->pipeline      = pipe;
+        impl->pipeline_sets = pipe_sets;
+        impl->pm_buf        = pm_buf;
+        impl->n             = n;
 
         GpuScorer s;
         s.impl_ = impl;
@@ -144,10 +199,11 @@ GpuScorer::~GpuScorer() {
         // ARC releases the held objects when the impl is destroyed; we used
         // strong ObjC refs in a C++ struct, so null them to drop references.
         @autoreleasepool {
-            impl->pipeline = nil;
-            impl->pm_buf   = nil;
-            impl->queue    = nil;
-            impl->device   = nil;
+            impl->pipeline      = nil;
+            impl->pipeline_sets = nil;
+            impl->pm_buf        = nil;
+            impl->queue         = nil;
+            impl->device        = nil;
         }
         delete impl;
         impl_ = nullptr;
@@ -206,6 +262,58 @@ GpuScorer::score_all(std::span<const WordIndex> candidates) const {
             return std::unexpected("GPU command buffer error");
 
         std::vector<GuessScore> out(impl->n);
+        std::memcpy(out.data(), out_buf.contents, out.size() * sizeof(GuessScore));
+        return out;
+    }
+}
+
+std::expected<std::vector<GpuScorer::GuessScore>, std::string>
+GpuScorer::score_sets(std::span<const WordIndex> packed,
+                      std::span<const std::uint32_t> offsets) const {
+    auto* impl = static_cast<GpuScorerImpl*>(impl_);
+    if (!impl) return std::unexpected("scorer not initialized");
+    if (offsets.size() < 2) return std::unexpected("score_sets needs >=1 set");
+    static_assert(sizeof(WordIndex) == sizeof(std::uint16_t));
+
+    const std::uint32_t nsets = static_cast<std::uint32_t>(offsets.size() - 1);
+
+    @autoreleasepool {
+        id<MTLBuffer> cand_buf =
+            [impl->device newBufferWithBytes:packed.data()
+                                      length:std::max<std::size_t>(1, packed.size() * sizeof(WordIndex))
+                                     options:MTLResourceStorageModeShared];
+        id<MTLBuffer> off_buf =
+            [impl->device newBufferWithBytes:offsets.data()
+                                      length:offsets.size() * sizeof(std::uint32_t)
+                                     options:MTLResourceStorageModeShared];
+        id<MTLBuffer> out_buf =
+            [impl->device newBufferWithLength:
+                static_cast<std::size_t>(nsets) * impl->n * sizeof(GuessScore)
+                                     options:MTLResourceStorageModeShared];
+        if (!cand_buf || !off_buf || !out_buf)
+            return std::unexpected("buffer alloc failed");
+
+        id<MTLCommandBuffer> cb = [impl->queue commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+        [enc setComputePipelineState:impl->pipeline_sets];
+        [enc setBuffer:impl->pm_buf offset:0 atIndex:0];
+        [enc setBuffer:cand_buf     offset:0 atIndex:1];
+        [enc setBuffer:off_buf      offset:0 atIndex:2];
+        [enc setBytes:&impl->n      length:sizeof(std::uint32_t) atIndex:3];
+        [enc setBuffer:out_buf      offset:0 atIndex:4];
+
+        const NSUInteger tew = impl->pipeline_sets.threadExecutionWidth;
+        MTLSize grid   = MTLSizeMake(impl->n, nsets, 1);
+        MTLSize tgroup = MTLSizeMake(tew, 1, 1);
+        [enc dispatchThreads:grid threadsPerThreadgroup:tgroup];
+        [enc endEncoding];
+        [cb commit];
+        [cb waitUntilCompleted];
+
+        if (cb.status == MTLCommandBufferStatusError)
+            return std::unexpected("GPU command buffer error");
+
+        std::vector<GuessScore> out(static_cast<std::size_t>(nsets) * impl->n);
         std::memcpy(out.data(), out_buf.contents, out.size() * sizeof(GuessScore));
         return out;
     }

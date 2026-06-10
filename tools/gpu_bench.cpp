@@ -126,6 +126,51 @@ int main(int argc, char** argv) {
         std::println("PARITY OK — GPU matches CPU");
     else
         std::println("PARITY FAILED");
+
+    // ── Batched frontier benchmark: many small sets in one dispatch ──────────
+    // Mirrors the real build workload: a frontier of many small candidate sets,
+    // each needing all guesses scored. Build `nsets` sets of ~set_size random
+    // candidates and compare batched-GPU vs the equivalent per-set CPU loop.
+    std::println("");
+    for (std::uint32_t set_size : {std::uint32_t{16}, std::uint32_t{40}, std::uint32_t{128}}) {
+        const std::uint32_t nsets = 2000;
+        std::vector<WordIndex> packed;
+        std::vector<std::uint32_t> offs{0};
+        packed.reserve(static_cast<std::size_t>(nsets) * set_size);
+        for (std::uint32_t s = 0; s < nsets; ++s) {
+            for (std::uint32_t k = 0; k < set_size; ++k)
+                packed.push_back(cand[(s * 7 + k * 101) % cand.size()]);
+            offs.push_back(static_cast<std::uint32_t>(packed.size()));
+        }
+
+        // CPU: score each set's guesses independently (the current build model).
+        auto c0 = Clock::now();
+        volatile std::uint32_t sink = 0;
+        for (std::uint32_t s = 0; s < nsets; ++s) {
+            std::vector<WordIndex> set(packed.begin() + offs[s], packed.begin() + offs[s + 1]);
+            auto cs = cpu_score_all(pm, N, set);
+            sink += cs[0].max_bucket;
+        }
+        double cpu_b = std::chrono::duration<double, std::milli>(Clock::now() - c0).count();
+
+        auto wb = scorer->score_sets(packed, offs);   // warm
+        if (!wb) { std::println("score_sets failed: {}", wb.error()); return 1; }
+        auto g0 = Clock::now();
+        auto gb = scorer->score_sets(packed, offs);
+        double gpu_b = std::chrono::duration<double, std::milli>(Clock::now() - g0).count();
+        if (!gb) { std::println("score_sets failed: {}", gb.error()); return 1; }
+
+        // Parity check on the first set.
+        std::vector<WordIndex> s0(packed.begin(), packed.begin() + offs[1]);
+        auto ref = cpu_score_all(pm, N, s0);
+        int mm = 0;
+        for (std::uint32_t g = 0; g < N; ++g)
+            if (ref[g].max_bucket != (*gb)[g].max_bucket) ++mm;
+
+        std::println("batched {} sets × {} cand: CPU {:.1f} ms, GPU {:.1f} ms ({:.1f}x)  "
+                     "[parity mm={}]", nsets, set_size, cpu_b, gpu_b, cpu_b / gpu_b, mm);
+        (void)sink;
+    }
 #else
     std::println("Metal not compiled in (WP_HAVE_METAL undefined) — CPU only.");
 #endif

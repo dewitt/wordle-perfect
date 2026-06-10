@@ -52,6 +52,16 @@ public:
     [[nodiscard]] std::expected<std::vector<GuessScore>, std::string>
     score_all(std::span<const WordIndex> candidates) const;
 
+    // Batched: score every guess against EACH of several candidate sets in a
+    // single GPU dispatch. `packed` holds all sets' candidate indices
+    // concatenated; `offsets` (size nsets+1) gives each set's [begin,end) slice.
+    // Result is row-major [set * N + guess], size nsets*N. This amortises the
+    // per-dispatch latency across a whole frontier of sets — the regime where
+    // many small per-set dispatches would otherwise be latency-bound.
+    [[nodiscard]] std::expected<std::vector<GuessScore>, std::string>
+    score_sets(std::span<const WordIndex> packed,
+               std::span<const std::uint32_t> offsets) const;
+
     [[nodiscard]] std::uint32_t n() const noexcept { return n_; }
 
 private:
