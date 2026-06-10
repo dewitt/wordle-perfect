@@ -20,8 +20,8 @@ namespace wp {
 //   • entropy    : the Shannon entropy of the partition (mean-depth heuristic).
 //
 // This is the single hottest per-node operation in the search (ranking ~15k
-// guesses), and it is embarrassingly data-parallel — the GPU sweet spot
-// (issue #12 / the hybrid CPU-search + GPU-scoring design).
+// guesses), and it is embarrassingly data-parallel — the GPU sweet spot in a
+// hybrid CPU-search + GPU-scoring design.
 //
 // Construction uploads the full N×N pattern matrix to the device once; each
 // score_all() call only uploads the (small) candidate index list. The interface

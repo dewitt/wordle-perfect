@@ -111,7 +111,7 @@ uint16_t EntropySolver::best_guess(std::span<const uint16_t> candidates,
     double   best_H            = -1.0;
     uint16_t best_word         = candidates[0];  // fallback
     // Track best_word's candidacy as state instead of re-running binary_search
-    // on it every iteration (issue #15); only recomputed when best_word changes.
+    // on it every iteration; only recomputed when best_word changes.
     bool     best_is_candidate = std::ranges::binary_search(candidates, best_word);
 
     // Prefer guesses that are themselves still candidates (breaks ties toward
@@ -161,7 +161,7 @@ SolveResult EntropySolver::solve(uint16_t answer_idx, int max_rounds) const {
 }
 
 // ---------------------------------------------------------------------------
-// Optimal (worst-case-bounded) tree construction: is_feasible / best_guess_feasible
+// Worst-case-bounded tree construction: is_feasible / best_guess_feasible
 // ---------------------------------------------------------------------------
 namespace {
 std::uint64_t feas_hash(std::span<const uint16_t> s, int depth) {

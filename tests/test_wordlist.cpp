@@ -26,7 +26,7 @@ TEST_CASE("WordList::load - loads valid file", "[wordlist]") {
     // data/words.txt is available in the build directory (configured by CMake)
     auto wl = WordList::load("data/words.txt");
     REQUIRE(wl.has_value());
-    CHECK(wl->size() > 10'000);  // we know it's 14,855
+    CHECK(wl->size() > 10'000);  // ~14,855 guess words
     CHECK_FALSE(wl->empty());
 }
 
@@ -36,7 +36,7 @@ TEST_CASE("WordList::load - answers subset is smaller than full word list", "[wo
     REQUIRE(words.has_value());
     REQUIRE(answers.has_value());
     CHECK(answers->size() < words->size());
-    CHECK(answers->size() > 2'000);  // we know it's 2,315
+    CHECK(answers->size() > 2'000);  // ~2,355 curated answers
 }
 
 TEST_CASE("WordList::load - fails on missing file", "[wordlist]") {

@@ -172,7 +172,7 @@ static void mode_play(const DB& db, const WordList& words,
         // observed (guess, response) patterns including this one. We check
         // against the curated candidate set (answers list, or the full list for
         // a full-coverage DB) — not the full guess vocabulary, which would make
-        // the check too permissive (issue #11).
+        // the check too permissive.
         guess_store.emplace_back(guess);
         history.push_back({guess_store.back(), p});
 
@@ -207,7 +207,6 @@ static void mode_play(const DB& db, const WordList& words,
 template <class DB>
 static void mode_eval(const DB& db, const WordList& words,
                       std::string_view eval_file) {
-    // Load evaluation word list
     auto eval_wl = WordList::load(eval_file);
     if (!eval_wl) die(eval_wl.error());
 

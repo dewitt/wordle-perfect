@@ -160,7 +160,7 @@ TEST_CASE("solve - solves all answer words within 6 guesses (sampled)", "[solver
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// any_consistent_word — solver-mode consistency check (#11)
+// any_consistent_word — solver-mode consistency check
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST_CASE("any_consistent_word - empty history is trivially consistent", "[solver]") {
@@ -204,14 +204,14 @@ TEST_CASE("any_consistent_word - guess-only word as answer is rejected vs answer
           "[solver]") {
     // The curated-answers semantics: a GGGGG on a word that is NOT in the
     // candidate (answer) set is inconsistent, because that word can never be the
-    // secret. This is exactly the #11 behavior the fix introduces.
+    // secret.
     auto answers = tiny_wordlist({"crane", "slate", "trail"});
     std::vector<GuessResponse> hist{{"tarse", PATTERN_SOLVED}};  // tarse not in set
     CHECK_FALSE(any_consistent_word(answers, hist));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// is_feasible / best_guess_feasible — worst-case-bounded tree construction (#8)
+// is_feasible / best_guess_feasible — worst-case-bounded tree construction
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST_CASE("is_feasible - trivial sets", "[solver][feasible]") {
@@ -230,8 +230,8 @@ TEST_CASE("is_feasible - trivial sets", "[solver][feasible]") {
 TEST_CASE("is_feasible - answer set is solvable in 5 but not 4 (sampled)",
           "[solver][feasible][slow]") {
     // The full answer set is provably worst-case-5 (and 4 is impossible). Proving
-    // 4-infeasibility over the whole set is expensive, so we check the headline
-    // direction (feasible at 5) on the real set, which is fast with memoization.
+    // 4-infeasibility over the whole set is expensive, so we check only the
+    // feasible-at-5 direction on the real set, which is fast with memoization.
     auto wl = WordList::load("data/words.txt");
     REQUIRE(wl.has_value());
     auto ans = WordList::load("data/answers.txt");

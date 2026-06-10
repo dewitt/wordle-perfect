@@ -420,9 +420,9 @@ std::expected<void, std::string> Database::finalize(const DbMetadata& meta) {
     // The DB is write-once and opened read-only at runtime, so WAL buys nothing
     // and leaves -wal/-shm sidecars next to the published artifact. Checkpoint
     // any WAL content back into the main file and switch to a rollback journal
-    // so the finalized .db is a single self-contained file (issue #22). These
-    // PRAGMAs must run outside a transaction. Best-effort: a failure here does
-    // not invalidate the (already-committed) data.
+    // so the finalized .db is a single self-contained file. These PRAGMAs must
+    // run outside a transaction. Best-effort: a failure here does not invalidate
+    // the (already-committed) data.
     //
     // Reset the cached hot-path statements first: a stepped-but-not-reset
     // statement (e.g. a node_info() lookup done before finalize) holds an

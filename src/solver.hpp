@@ -96,12 +96,8 @@ public:
     // game allows 6 guesses; full-coverage DBs may need up to 8.
     static constexpr int DEFAULT_MAX_ROUNDS = 6;
 
-    // ── Worst-case-bounded tree construction (issues #8, #27) ───────────────
+    // ── Worst-case-bounded tree construction ────────────────────────────────
     //
-    // is_feasible(candidates, depth): true iff `candidates` can be solved with
-    // worst-case depth <= `depth`. DFS minimax over the answer set with
-    // memoization on the sorted candidate set and max-bucket guess ordering.
-    // Optionally returns a witness guess that keeps every bucket feasible.
     // is_feasible(candidates, depth): true iff `candidates` can be solved with
     // worst-case depth <= `depth`. DFS minimax over the answer set with
     // memoization on the sorted candidate set and max-bucket guess ordering.
@@ -125,9 +121,9 @@ public:
     // Total depth (Σ over candidates, direct hit = 1) of the feasibility-
     // constrained entropy-greedy tree when the first guess is fixed to `opener`,
     // under a worst-case cap of `budget`. Returns INT_MAX if `opener` cannot
-    // keep the set solvable within `budget`. Used by the parallel opener sweep
-    // in the exact solver (issue #27). Each thread should use its own
-    // EntropySolver instance (the feasibility memo is per-instance, not shared).
+    // keep the set solvable within `budget`. Used by the parallel opener sweep;
+    // each thread must use its own EntropySolver instance (the feasibility memo
+    // is per-instance, not shared).
     [[nodiscard]] int
     tree_total_for_opener(std::span<const uint16_t> candidates,
                           uint16_t opener, int budget,

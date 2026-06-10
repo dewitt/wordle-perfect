@@ -174,7 +174,7 @@ TEST_CASE("Database - verify_integrity detects post-finalize tampering", "[datab
     // Build and finalize a valid DB, then mutate a node row out-of-band via raw
     // sqlite3 while leaving the stored checksum stale. verify_integrity() must
     // then fail. This exercises the database_corruption_detection contract end
-    // to end (the earlier version of this test gave up before tampering).
+    // to end.
     std::string path = temp_db_path();
     std::filesystem::remove(path);
 
