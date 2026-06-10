@@ -18,8 +18,10 @@
 #include "solver.hpp"
 #include "database.hpp"
 #include "binarydb.hpp"
+#include "progress.hpp"
 
 #include <filesystem>
+#include <optional>
 
 #include <algorithm>
 #include <chrono>
@@ -42,6 +44,11 @@ const WordList*      g_words = nullptr;
 const PatternMatrix* g_pm    = nullptr;
 std::uint64_t        g_nodes = 0;
 int                  g_max_depth = 5;
+
+// Optional live progress for the tree-search phases (set in main before the
+// search; the total is unknown so it shows a spinner + solved-set count + rate).
+std::optional<Progress> g_progress;
+std::uint64_t           g_solved_sets = 0;
 
 // ── feasibility memo ────────────────────────────────────────────────────────
 // Key: hash(sorted candidate set) combined with depth. Value: feasible?
@@ -208,6 +215,7 @@ int tree_total(const std::vector<uint16_t>& cand, int depth) {
     }
     g_tree[key] = best;
     if (best_gi != WordList::NPOS) g_tree_choice[key] = best_gi;
+    if (g_progress) g_progress->update(++g_solved_sets);  // throttled internally
     return best;
 }
 
@@ -365,6 +373,9 @@ int main(int argc, char** argv) {
 
     // ── tree mode: feasibility-constrained entropy-greedy (worst<=D, low mean) ─
     if (mode == "tree") {
+        // Live spinner: the search visits an unknown number of candidate-sets,
+        // so report a running count of solved sets + elapsed + rate.
+        g_progress.emplace("  searching tree", std::uint64_t{0}, "sets");
         int total = TREE_INF; uint16_t root = WordList::NPOS;
         if (!forced_start.empty()) {
             auto gi = wl->index_of(forced_start);
@@ -394,6 +405,7 @@ int main(int argc, char** argv) {
             // root recorded implicitly by the first feasible top-level guess;
             // re-derive it cheaply for reporting.
         }
+        if (g_progress) { g_progress->finish(g_solved_sets); g_progress.reset(); }
         double s = std::chrono::duration<double>(Clock::now() - t0).count();
         if (total >= TREE_INF) {
             std::println("TREE: infeasible at worst<={} ({:.1f}s)", max_depth, s);

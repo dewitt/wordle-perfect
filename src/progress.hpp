@@ -27,8 +27,11 @@ namespace wp {
 
 class Progress {
 public:
-    explicit Progress(std::string_view label, std::uint64_t total = 0)
-        : label_{label}, total_{total},
+    // `unit` labels the counter in indeterminate (spinner) mode, e.g. "nodes"
+    // or "sets". Ignored in determinate (percentage) mode.
+    explicit Progress(std::string_view label, std::uint64_t total = 0,
+                      std::string_view unit = "items")
+        : label_{label}, unit_{unit}, total_{total},
           start_{Clock::now()}, last_draw_{start_},
           tty_{::isatty(STDERR_FILENO) != 0} {}
 
@@ -66,8 +69,8 @@ private:
                                label_, bar, pct, done, total_, secs);
         } else {
             const char spin = kSpin[(spin_++) & 3];
-            line = std::format("{} {}  {} nodes  {:.1f}s  ({:.0f}/s)",
-                               label_, spin, done, secs, rate);
+            line = std::format("{} {}  {} {}  {:.1f}s  ({:.0f}/s)",
+                               label_, spin, done, unit_, secs, rate);
         }
 
         if (tty_) {
@@ -84,6 +87,7 @@ private:
     }
 
     std::string         label_;
+    std::string         unit_;
     std::uint64_t       total_;
     Clock::time_point   start_;
     Clock::time_point   last_draw_;

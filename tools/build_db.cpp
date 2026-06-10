@@ -99,7 +99,7 @@ struct TreeBuilder {
         if (auto r = db.begin_transaction(); !r) die(r.error());
         // The total node count is unknown until the depth-first build finishes,
         // so this is an indeterminate spinner (live node count + rate).
-        progress.emplace("  building tree");
+        progress.emplace("  building tree", std::uint64_t{0}, "nodes");
         auto all_candidates = words.all_indices();
         uint32_t root = build_node(all_candidates, 1);
         progress->finish(nodes_written);
