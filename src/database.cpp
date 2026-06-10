@@ -269,8 +269,8 @@ std::expected<void, std::string> Database::write_metadata(const DbMetadata& m) {
 // ---------------------------------------------------------------------------
 // Lookup (hot path)
 // ---------------------------------------------------------------------------
-std::expected<uint32_t, std::string>
-Database::next_node(uint32_t node_id, Pattern pattern) const {
+std::expected<NodeId, std::string>
+Database::next_node(NodeId node_id, Pattern pattern) const {
     if (pattern == PATTERN_SOLVED) return NULL_NODE;
 
     // Lazy-prepare and cache the statement; reset on reuse.
@@ -293,13 +293,13 @@ Database::next_node(uint32_t node_id, Pattern pattern) const {
             "no edge from node {} for pattern {}", node_id, pattern));
     }
 
-    auto child = static_cast<uint32_t>(sqlite3_column_int(stmt_next_node_, 0));
+    auto child = static_cast<NodeId>(sqlite3_column_int(stmt_next_node_, 0));
     sqlite3_reset(stmt_next_node_);  // don't hold an implicit read txn open
     return child;
 }
 
-std::expected<std::pair<uint16_t, Depth>, std::string>
-Database::node_info(uint32_t node_id) const {
+std::expected<std::pair<WordIndex, Depth>, std::string>
+Database::node_info(NodeId node_id) const {
     // Lazy-prepare and cache the statement; reset on reuse.
     if (!stmt_node_info_) {
         if (sqlite3_prepare_v2(db_,
@@ -317,7 +317,7 @@ Database::node_info(uint32_t node_id) const {
         return std::unexpected(std::format("node {} not found", node_id));
     }
 
-    auto word_idx = static_cast<uint16_t>(sqlite3_column_int(stmt_node_info_, 0));
+    auto word_idx = static_cast<WordIndex>(sqlite3_column_int(stmt_node_info_, 0));
     auto depth    = static_cast<Depth>(sqlite3_column_int(stmt_node_info_, 1));
     // Reset immediately so the statement doesn't hold an implicit read
     // transaction open on the connection between calls.
@@ -325,7 +325,7 @@ Database::node_info(uint32_t node_id) const {
     return std::pair{word_idx, depth};
 }
 
-std::expected<uint16_t, std::string> Database::root_word() const {
+std::expected<WordIndex, std::string> Database::root_word() const {
     auto info = node_info(ROOT_ID);
     if (!info) return std::unexpected(info.error());
     return info->first;
@@ -352,8 +352,8 @@ std::expected<void, std::string> Database::commit_transaction() {
     return {};
 }
 
-std::expected<uint32_t, std::string>
-Database::insert_node(uint32_t id, uint16_t word_idx, Depth depth) {
+std::expected<NodeId, std::string>
+Database::insert_node(NodeId id, WordIndex word_idx, Depth depth) {
     StmtGuard st;
     if (sqlite3_prepare_v2(db_,
             "INSERT INTO nodes(id, word_idx, depth) VALUES(?,?,?)",
@@ -370,7 +370,7 @@ Database::insert_node(uint32_t id, uint16_t word_idx, Depth depth) {
 }
 
 std::expected<void, std::string>
-Database::insert_edge(uint32_t parent, Pattern pattern, uint32_t child) {
+Database::insert_edge(NodeId parent, Pattern pattern, NodeId child) {
     StmtGuard st;
     if (sqlite3_prepare_v2(db_,
             "INSERT INTO edges(parent, pattern, child) VALUES(?,?,?)",
@@ -465,8 +465,8 @@ Database::all_nodes() const {
         return std::unexpected(db_errmsg(db_));
     while (sqlite3_step(*st) == SQLITE_ROW) {
         rows.push_back({
-            static_cast<uint32_t>(sqlite3_column_int(*st, 0)),
-            static_cast<uint16_t>(sqlite3_column_int(*st, 1)),
+            static_cast<NodeId>(sqlite3_column_int(*st, 0)),
+            static_cast<WordIndex>(sqlite3_column_int(*st, 1)),
             static_cast<Depth>(sqlite3_column_int(*st, 2)),
         });
     }
@@ -483,9 +483,9 @@ Database::all_edges() const {
         return std::unexpected(db_errmsg(db_));
     while (sqlite3_step(*st) == SQLITE_ROW) {
         rows.push_back({
-            static_cast<uint32_t>(sqlite3_column_int(*st, 0)),
+            static_cast<NodeId>(sqlite3_column_int(*st, 0)),
             static_cast<Pattern>(sqlite3_column_int(*st, 1)),
-            static_cast<uint32_t>(sqlite3_column_int(*st, 2)),
+            static_cast<NodeId>(sqlite3_column_int(*st, 2)),
         });
     }
     return rows;
@@ -500,8 +500,8 @@ void Database::dump(const WordList& words) const {
         StmtGuard st;
         sqlite3_prepare_v2(db_, "SELECT id, word_idx, depth FROM nodes ORDER BY id", -1, &st, nullptr);
         while (sqlite3_step(*st) == SQLITE_ROW) {
-            auto id       = static_cast<uint32_t>(sqlite3_column_int(*st, 0));
-            auto word_idx = static_cast<uint16_t>(sqlite3_column_int(*st, 1));
+            auto id       = static_cast<NodeId>(sqlite3_column_int(*st, 0));
+            auto word_idx = static_cast<WordIndex>(sqlite3_column_int(*st, 1));
             auto depth    = sqlite3_column_int(*st, 2);
             std::println("  node {:6d}  word={:5}  depth={}",
                 id,

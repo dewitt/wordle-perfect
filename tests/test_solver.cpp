@@ -40,10 +40,10 @@ TEST_CASE("PatternMatrix - get() matches compute_pattern", "[solver]") {
     for (std::size_t gi = 0; gi < n; ++gi) {
         for (std::size_t ai = 0; ai < n; ++ai) {
             Pattern expected = compute_pattern(
-                wl[static_cast<uint16_t>(gi)].view(),
-                wl[static_cast<uint16_t>(ai)].view());
-            CHECK(pm.get(static_cast<uint16_t>(gi),
-                         static_cast<uint16_t>(ai)) == expected);
+                wl[static_cast<WordIndex>(gi)].view(),
+                wl[static_cast<WordIndex>(ai)].view());
+            CHECK(pm.get(static_cast<WordIndex>(gi),
+                         static_cast<WordIndex>(ai)) == expected);
         }
     }
 }
@@ -58,7 +58,7 @@ TEST_CASE("partition - GGGGG bucket contains only the guess itself", "[solver]")
     EntropySolver solver{wl, pm};
 
     auto all = wl.all_indices();
-    for (uint16_t gi : all) {
+    for (WordIndex gi : all) {
         auto buckets = EntropySolver::partition(all, gi, pm);
         // The GGGGG bucket must contain exactly gi
         REQUIRE(buckets[PATTERN_SOLVED].size() == 1);
@@ -91,7 +91,7 @@ TEST_CASE("best_guess - single candidate returns itself", "[solver]") {
     auto ci = wl.index_of("crane");
     REQUIRE(ci != WordList::NPOS);
 
-    auto result = solver.best_guess(std::span<const uint16_t>{&ci, 1});
+    auto result = solver.best_guess(std::span<const WordIndex>{&ci, 1});
     CHECK(result == ci);
 }
 
@@ -106,7 +106,7 @@ TEST_CASE("best_guess - two candidates returns first", "[solver]") {
     REQUIRE(si != WordList::NPOS);
 
     // The two-candidate fast-path returns candidates[0]
-    std::vector<uint16_t> two = {ci, si};
+    std::vector<WordIndex> two = {ci, si};
     std::ranges::sort(two);
     CHECK(solver.best_guess(two) == two[0]);
 }
@@ -116,7 +116,7 @@ TEST_CASE("best_guess - empty candidates returns NPOS", "[solver]") {
     auto pm = PatternMatrix::build(wl);
     EntropySolver solver{wl, pm};
 
-    std::vector<uint16_t> empty{};
+    std::vector<WordIndex> empty{};
     CHECK(solver.best_guess(empty) == WordList::NPOS);
 }
 
@@ -148,7 +148,7 @@ TEST_CASE("solve - solves all answer words within 6 guesses (sampled)", "[solver
 
     // Sample every 10th word to keep test runtime under a second
     int failures = 0;
-    for (uint16_t i = 0; i < static_cast<uint16_t>(wl->size()); i += 10) {
+    for (WordIndex i = 0; i < static_cast<WordIndex>(wl->size()); i += 10) {
         auto result = solver.solve(i);
         if (!result.solved || result.depth() > 6) {
             ++failures;
@@ -219,10 +219,10 @@ TEST_CASE("is_feasible - trivial sets", "[solver][feasible]") {
     auto pm = PatternMatrix::build(wl);
     EntropySolver solver{wl, pm};
 
-    std::vector<uint16_t> empty{};
+    std::vector<WordIndex> empty{};
     CHECK(solver.is_feasible(empty, 5));            // empty trivially feasible
-    uint16_t one = wl.index_of("crane");
-    CHECK(solver.is_feasible(std::span<const uint16_t>{&one, 1}, 1));  // singleton in 1
+    WordIndex one = wl.index_of("crane");
+    CHECK(solver.is_feasible(std::span<const WordIndex>{&one, 1}, 1));  // singleton in 1
     auto all = wl.all_indices();
     CHECK_FALSE(solver.is_feasible(all, 1));         // 3 words can't solve in 1
 }
@@ -239,14 +239,14 @@ TEST_CASE("is_feasible - answer set is solvable in 5 but not 4 (sampled)",
     auto pm = PatternMatrix::build(*wl);
     EntropySolver solver{*wl, pm};
 
-    std::vector<uint16_t> cand;
+    std::vector<WordIndex> cand;
     for (auto& w : ans->span()) {
         auto idx = wl->index_of(w.view());
         if (idx != WordList::NPOS) cand.push_back(idx);
     }
     std::ranges::sort(cand);
 
-    uint16_t witness = WordList::NPOS;
+    WordIndex witness = WordList::NPOS;
     CHECK(solver.is_feasible(cand, 5, &witness));
     CHECK(witness != WordList::NPOS);
 }
@@ -260,14 +260,14 @@ TEST_CASE("best_guess_feasible - returns a feasible, splitting guess",
     auto pm = PatternMatrix::build(*wl);
     EntropySolver solver{*wl, pm};
 
-    std::vector<uint16_t> cand;
+    std::vector<WordIndex> cand;
     for (auto& w : ans->span()) {
         auto idx = wl->index_of(w.view());
         if (idx != WordList::NPOS) cand.push_back(idx);
     }
     std::ranges::sort(cand);
 
-    uint16_t g = solver.best_guess_feasible(cand, 5, /*lookahead=*/1);
+    WordIndex g = solver.best_guess_feasible(cand, 5, /*lookahead=*/1);
     REQUIRE(g != WordList::NPOS);
     // The chosen guess must split the set (max bucket < n) and keep every bucket
     // feasible at depth 4.

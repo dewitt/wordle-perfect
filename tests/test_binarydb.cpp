@@ -205,16 +205,16 @@ TEST_CASE("BinaryDb - lookups match SQLite on the real answers tree", "[binarydb
     REQUIRE(db->begin_transaction().has_value());
 
     // Iterative greedy build mirroring build_db's structure.
-    uint32_t next_id = 0;
-    std::function<uint32_t(std::vector<uint16_t>, int)> build =
-        [&](std::vector<uint16_t> cand, int depth) -> uint32_t {
-        uint32_t id = next_id++;
-        uint16_t guess = solver.best_guess(cand);
+    NodeId next_id = 0;
+    std::function<NodeId(std::vector<WordIndex>, int)> build =
+        [&](std::vector<WordIndex> cand, int depth) -> NodeId {
+        NodeId id = next_id++;
+        WordIndex guess = solver.best_guess(cand);
         REQUIRE(db->insert_node(id, guess, static_cast<Depth>(depth)).has_value());
         auto buckets = EntropySolver::partition(cand, guess, pm);
         for (Pattern p = 0; p < PATTERN_COUNT - 1; ++p) {
             if (buckets[p].empty()) continue;
-            uint32_t child = build(buckets[p], depth + 1);
+            NodeId child = build(buckets[p], depth + 1);
             REQUIRE(db->insert_edge(id, p, child).has_value());
         }
         return id;
@@ -236,8 +236,8 @@ TEST_CASE("BinaryDb - lookups match SQLite on the real answers tree", "[binarydb
     int mismatches = 0;
     for (const auto& w : wl->span()) {
         std::string_view target = w.view();
-        uint32_t sq_node = Database::ROOT_ID;
-        uint32_t bn_node = BinaryDb::ROOT_ID;
+        NodeId sq_node = Database::ROOT_ID;
+        NodeId bn_node = BinaryDb::ROOT_ID;
         for (int round = 1; round <= 12; ++round) {
             auto si = db->node_info(sq_node);
             auto bi = bin->node_info(bn_node);

@@ -166,15 +166,19 @@ GpuScorer& GpuScorer::operator=(GpuScorer&& o) noexcept {
 }
 
 std::expected<std::vector<GpuScorer::GuessScore>, std::string>
-GpuScorer::score_all(std::span<const std::uint16_t> candidates) const {
+GpuScorer::score_all(std::span<const WordIndex> candidates) const {
     auto* impl = static_cast<GpuScorerImpl*>(impl_);
     if (!impl) return std::unexpected("scorer not initialized");
     const std::uint32_t ncand = static_cast<std::uint32_t>(candidates.size());
 
+    // The MSL kernel declares the candidate buffer as uint16_t; WordIndex must
+    // stay 16-bit for this upload to match.
+    static_assert(sizeof(WordIndex) == sizeof(std::uint16_t));
+
     @autoreleasepool {
         id<MTLBuffer> cand_buf =
             [impl->device newBufferWithBytes:candidates.data()
-                                      length:std::max<std::size_t>(1, ncand * sizeof(std::uint16_t))
+                                      length:std::max<std::size_t>(1, ncand * sizeof(WordIndex))
                                      options:MTLResourceStorageModeShared];
         id<MTLBuffer> out_buf =
             [impl->device newBufferWithLength:static_cast<std::size_t>(impl->n) * sizeof(GuessScore)

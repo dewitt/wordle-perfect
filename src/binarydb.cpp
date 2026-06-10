@@ -25,7 +25,7 @@ struct Header {
     uint32_t version;
     uint32_t node_count;
     uint32_t edge_count;
-    uint32_t root_id;
+    NodeId   root_id;        // == ROOT_ID; 32-bit on disk
     uint32_t worst_depth;
     uint32_t total_words;
     uint32_t total_answers;
@@ -40,17 +40,17 @@ struct Header {
 static_assert(sizeof(Header) == 64, "Header layout drift");
 
 struct NodeRec {
-    uint16_t word_idx;
-    Depth    depth;
-    uint8_t  _pad;
-    uint32_t edge_off;      // first edge index; count = next.edge_off - edge_off
+    WordIndex word_idx;
+    Depth     depth;
+    uint8_t   _pad;
+    uint32_t  edge_off;     // first edge index; count = next.edge_off - edge_off
 };
 static_assert(sizeof(NodeRec) == 8, "NodeRec layout drift");
 
 struct EdgeRec {
     Pattern  pattern;
     uint8_t  _pad[3];
-    uint32_t child;
+    NodeId   child;
 };
 static_assert(sizeof(EdgeRec) == 8, "EdgeRec layout drift");
 
@@ -296,16 +296,16 @@ std::expected<DbMetadata, std::string> BinaryDb::read_metadata() const {
     return m;
 }
 
-std::expected<std::pair<uint16_t, Depth>, std::string>
-BinaryDb::node_info(uint32_t node_id) const {
+std::expected<std::pair<WordIndex, Depth>, std::string>
+BinaryDb::node_info(NodeId node_id) const {
     if (node_id >= node_count_)
         return std::unexpected(std::format("node {} out of range", node_id));
     const NodeRec& n = nodes_of(base_)[node_id];
-    return std::pair<uint16_t, Depth>{n.word_idx, n.depth};
+    return std::pair<WordIndex, Depth>{n.word_idx, n.depth};
 }
 
-std::expected<uint32_t, std::string>
-BinaryDb::next_node(uint32_t node_id, Pattern pattern) const {
+std::expected<NodeId, std::string>
+BinaryDb::next_node(NodeId node_id, Pattern pattern) const {
     if (node_id >= node_count_)
         return std::unexpected(std::format("node {} out of range", node_id));
     if (pattern == PATTERN_SOLVED) return NULL_NODE;
@@ -327,7 +327,7 @@ BinaryDb::next_node(uint32_t node_id, Pattern pattern) const {
     return it->child;
 }
 
-std::expected<uint16_t, std::string> BinaryDb::root_word() const {
+std::expected<WordIndex, std::string> BinaryDb::root_word() const {
     auto info = node_info(ROOT_ID);
     if (!info) return std::unexpected(info.error());
     return info->first;

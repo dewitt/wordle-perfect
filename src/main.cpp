@@ -85,7 +85,7 @@ static void mode_solve(const DB& db, const WordList& words,
         }
     }
 
-    uint32_t node = DB::ROOT_ID;
+    NodeId node = DB::ROOT_ID;
     int step = 0;
 
     std::println("solving: {}", target);
@@ -125,7 +125,7 @@ static void mode_play(const DB& db, const WordList& words,
     auto root_word_res = db.root_word();
     if (!root_word_res) die(root_word_res.error());
 
-    uint32_t node = DB::ROOT_ID;
+    NodeId node = DB::ROOT_ID;
 
     // Track previous (guess, response) pairs for consistency checking. We keep
     // the guess strings stable so GuessResponse can hold views into them; reserve

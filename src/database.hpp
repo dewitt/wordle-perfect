@@ -19,6 +19,9 @@ namespace wp {
 // depth 2, etc. One byte suffices (worst case is 5; full-coverage 7).
 using Depth = std::uint8_t;
 
+// Identifier of a node in the decision tree (dense, 0-based; ROOT_ID == 0).
+using NodeId = std::uint32_t;
+
 // ---------------------------------------------------------------------------
 // DbMetadata — self-describing artifact record
 // ---------------------------------------------------------------------------
@@ -49,8 +52,8 @@ struct DbMetadata {
 // ---------------------------------------------------------------------------
 class Database {
 public:
-    static constexpr uint32_t NULL_NODE = UINT32_MAX;
-    static constexpr uint32_t ROOT_ID   = 0;
+    static constexpr NodeId NULL_NODE = UINT32_MAX;
+    static constexpr NodeId ROOT_ID   = 0;
 
     static std::expected<Database, std::string> open(std::string_view path);
     static std::expected<Database, std::string> create(std::string_view path);
@@ -68,25 +71,25 @@ public:
     [[nodiscard]] std::expected<DbMetadata, std::string> read_metadata()  const;
     [[nodiscard]] std::expected<void, std::string>       write_metadata(const DbMetadata& m);
 
-    [[nodiscard]] std::expected<uint32_t, std::string>
-    next_node(uint32_t node_id, Pattern pattern) const;
+    [[nodiscard]] std::expected<NodeId, std::string>
+    next_node(NodeId node_id, Pattern pattern) const;
 
     // Node info (word_idx and depth) for display
-    [[nodiscard]] std::expected<std::pair<uint16_t, Depth>, std::string>
-    node_info(uint32_t node_id) const;
+    [[nodiscard]] std::expected<std::pair<WordIndex, Depth>, std::string>
+    node_info(NodeId node_id) const;
 
     // Word index at root (= optimal first guess)
-    [[nodiscard]] std::expected<uint16_t, std::string> root_word() const;
+    [[nodiscard]] std::expected<WordIndex, std::string> root_word() const;
 
     // Build helpers — used by build_db during precomputation
     [[nodiscard]] std::expected<void, std::string> begin_transaction();
     [[nodiscard]] std::expected<void, std::string> commit_transaction();
 
-    [[nodiscard]] std::expected<uint32_t, std::string>
-    insert_node(uint32_t id, uint16_t word_idx, Depth depth);
+    [[nodiscard]] std::expected<NodeId, std::string>
+    insert_node(NodeId id, WordIndex word_idx, Depth depth);
 
     [[nodiscard]] std::expected<void, std::string>
-    insert_edge(uint32_t parent, Pattern pattern, uint32_t child);
+    insert_edge(NodeId parent, Pattern pattern, NodeId child);
 
     // Call after all inserts: creates indices and writes checksum
     [[nodiscard]] std::expected<void, std::string> finalize(const DbMetadata& meta);
@@ -99,8 +102,8 @@ public:
 
     // Bulk export of the tree for conversion to other formats (e.g. BinaryDb).
     // NodeRow is ordered by id; EdgeRow is ordered by (parent, pattern).
-    struct NodeRow { uint32_t id; uint16_t word_idx; Depth depth; };
-    struct EdgeRow { uint32_t parent; Pattern pattern; uint32_t child; };
+    struct NodeRow { NodeId id; WordIndex word_idx; Depth depth; };
+    struct EdgeRow { NodeId parent; Pattern pattern; NodeId child; };
     [[nodiscard]] std::expected<std::vector<NodeRow>, std::string> all_nodes() const;
     [[nodiscard]] std::expected<std::vector<EdgeRow>, std::string> all_edges() const;
 
@@ -151,7 +154,7 @@ template <class DB>
 walk_target(const DB& db, const WordList& words, std::string_view target,
             int max_rounds = WALK_DEPTH_CAP) {
     WalkOutcome out;
-    uint32_t node = DB::ROOT_ID;
+    NodeId node = DB::ROOT_ID;
 
     for (int round = 1; round <= max_rounds; ++round) {
         auto info = db.node_info(node);

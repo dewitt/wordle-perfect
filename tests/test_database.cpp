@@ -233,9 +233,9 @@ TEST_CASE("walk_target - reports correct depth and missing-edge status", "[datab
     std::filesystem::remove(wf);
     REQUIRE(wl.has_value());
 
-    const uint16_t ia = wl->index_of("aaaaa");
-    const uint16_t ib = wl->index_of("bbbbb");
-    const uint16_t ic = wl->index_of("ccccc");
+    const WordIndex ia = wl->index_of("aaaaa");
+    const WordIndex ib = wl->index_of("bbbbb");
+    const WordIndex ic = wl->index_of("ccccc");
     REQUIRE(ia != WordList::NPOS);
 
     // Patterns for the guesses we place at each node, against each answer.
@@ -271,7 +271,7 @@ TEST_CASE("walk_target - missing edge yields MissingEdge, not a long FAIL", "[da
     std::filesystem::remove(wf);
     REQUIRE(wl.has_value());
 
-    const uint16_t ia = wl->index_of("aaaaa");
+    const WordIndex ia = wl->index_of("aaaaa");
 
     // Root guesses aaaaa but has NO outgoing edges. Any non-solving target
     // should return MissingEdge immediately.
@@ -333,18 +333,18 @@ TEST_CASE("Database - repeated node_info calls return consistent results", "[dat
 namespace {
 // Recursively build a greedy decision tree for `candidates` into `db`, mirroring
 // the build_db pipeline but using only public library APIs. Returns the node id.
-uint32_t build_greedy_tree(Database& db, const EntropySolver& solver,
+NodeId build_greedy_tree(Database& db, const EntropySolver& solver,
                            const PatternMatrix& pm,
-                           std::vector<uint16_t> candidates, int depth,
-                           uint32_t& next_id) {
-    const uint32_t my_id = next_id++;
-    const uint16_t guess = solver.best_guess(candidates);
+                           std::vector<WordIndex> candidates, int depth,
+                           NodeId& next_id) {
+    const NodeId my_id = next_id++;
+    const WordIndex guess = solver.best_guess(candidates);
     REQUIRE(db.insert_node(my_id, guess, static_cast<Depth>(depth)).has_value());
 
     auto buckets = EntropySolver::partition(candidates, guess, pm);
     for (Pattern p = 0; p < PATTERN_COUNT - 1; ++p) {  // skip GGGGG
         if (buckets[p].empty()) continue;
-        uint32_t child = build_greedy_tree(db, solver, pm, buckets[p],
+        NodeId child = build_greedy_tree(db, solver, pm, buckets[p],
                                            depth + 1, next_id);
         REQUIRE(db.insert_edge(my_id, p, child).has_value());
     }
@@ -362,7 +362,7 @@ TEST_CASE("end-to-end - built tree solves every answer via walk_target", "[datab
     REQUIRE(db.has_value());
 
     REQUIRE(db->begin_transaction().has_value());
-    uint32_t next_id = 0;
+    NodeId next_id = 0;
     build_greedy_tree(*db, solver, pm, wl->all_indices(), 1, next_id);
     REQUIRE(db->commit_transaction().has_value());
 

@@ -78,16 +78,16 @@ std::string file_mtime_date(const std::string& path) {
     return std::format("{:%Y-%m-%d}", std::chrono::floor<std::chrono::days>(tp));
 }
 
-int max_bucket(const PatternMatrix& pm, const std::vector<uint16_t>& cand, uint16_t gi) {
-    std::array<uint16_t, PATTERN_COUNT> cnt{};
+int max_bucket(const PatternMatrix& pm, const std::vector<WordIndex>& cand, WordIndex gi) {
+    std::array<uint16_t, PATTERN_COUNT> cnt{};  // bucket counts
     int mx = 0;
-    for (uint16_t ai : cand) { int c = ++cnt[pm.get(gi, ai)]; if (c > mx) mx = c; }
+    for (WordIndex ai : cand) { int c = ++cnt[pm.get(gi, ai)]; if (c > mx) mx = c; }
     return mx;
 }
 
-double entropy_of(const PatternMatrix& pm, const std::vector<uint16_t>& cand, uint16_t gi) {
+double entropy_of(const PatternMatrix& pm, const std::vector<WordIndex>& cand, WordIndex gi) {
     std::array<int, PATTERN_COUNT> cnt{};
-    for (uint16_t ai : cand) ++cnt[pm.get(gi, ai)];
+    for (WordIndex ai : cand) ++cnt[pm.get(gi, ai)];
     const double tot = static_cast<double>(cand.size());
     double H = 0.0;
     for (int c : cnt) if (c) { double p = c / tot; H -= p * std::log2(p); }
@@ -111,7 +111,7 @@ double entropy_of(const PatternMatrix& pm, const std::vector<uint16_t>& cand, ui
 // 14,855-opener × lookahead-30 sweep is ~tens of hours. Keep the sweep at 1.
 // ---------------------------------------------------------------------------
 struct BuildResult {
-    uint16_t      opener;
+    WordIndex     opener;
     std::uint64_t nodes;
     std::size_t   openers_swept   = 0;   // 0 if a forced opener skipped the sweep
     double        sweep_s         = 0.0;
@@ -134,20 +134,20 @@ void accumulate(EntropySolver::Stats& acc, const EntropySolver::Stats& s) {
 }
 
 BuildResult build_tree(const WordList& wl, const PatternMatrix& pm,
-                       Database& db, const std::vector<uint16_t>& cand,
+                       Database& db, const std::vector<WordIndex>& cand,
                        int worst_cap, std::size_t sweep_lookahead,
                        std::size_t emit_lookahead, std::size_t top,
-                       uint16_t forced_root, unsigned nthreads) {
+                       WordIndex forced_root, unsigned nthreads) {
     const int n = static_cast<int>(cand.size());
     BuildResult result;
 
-    uint16_t opener = forced_root;
+    WordIndex opener = forced_root;
     if (opener == WordList::NPOS) {
         // Rank candidate openers by entropy (best mean first); optionally cap.
-        std::vector<std::pair<double, uint16_t>> openers;
+        std::vector<std::pair<double, WordIndex>> openers;
         openers.reserve(wl.size());
         for (std::size_t g = 0; g < wl.size(); ++g) {
-            const auto gi = static_cast<uint16_t>(g);
+            const auto gi = static_cast<WordIndex>(g);
             if (max_bucket(pm, cand, gi) == n) continue;  // no progress
             openers.emplace_back(entropy_of(pm, cand, gi), gi);
         }
@@ -167,7 +167,7 @@ BuildResult build_tree(const WordList& wl, const PatternMatrix& pm,
         std::atomic<std::size_t> done{0};
         std::mutex best_mtx;
         int best_total = std::numeric_limits<int>::max();
-        uint16_t best_opener = WordList::NPOS;
+        WordIndex best_opener = WordList::NPOS;
 
         // Shared feasibility cache: is_feasible() is opener-independent, so all
         // workers reuse each other's results instead of recomputing overlapping
@@ -180,7 +180,7 @@ BuildResult build_tree(const WordList& wl, const PatternMatrix& pm,
             for (;;) {
                 std::size_t i = next.fetch_add(1, std::memory_order_relaxed);
                 if (i >= openers.size()) break;
-                uint16_t gi = openers[i].second;
+                WordIndex gi = openers[i].second;
                 int total = solver.tree_total_for_opener(cand, gi, worst_cap, sweep_lookahead);
                 std::size_t d = done.fetch_add(1, std::memory_order_relaxed) + 1;
                 prog.update(d);
@@ -216,12 +216,12 @@ BuildResult build_tree(const WordList& wl, const PatternMatrix& pm,
     Progress prog{"  building tree", std::uint64_t{0}, "nodes"};
     const auto emit_t0 = Clock::now();
     std::uint64_t nodes = 0;
-    uint32_t next_id = 0;
+    NodeId next_id = 0;
 
-    std::function<uint32_t(const std::vector<uint16_t>&, int, uint16_t)> emit =
-        [&](const std::vector<uint16_t>& set, int budget, uint16_t forced) -> uint32_t {
-        uint32_t id = next_id++;
-        uint16_t guess = (forced != WordList::NPOS) ? forced
+    std::function<NodeId(const std::vector<WordIndex>&, int, WordIndex)> emit =
+        [&](const std::vector<WordIndex>& set, int budget, WordIndex forced) -> NodeId {
+        NodeId id = next_id++;
+        WordIndex guess = (forced != WordList::NPOS) ? forced
             : (set.size() == 1 ? set[0]
                : solver.best_guess_feasible(set, budget, emit_lookahead));
         if (guess == WordList::NPOS)
@@ -233,7 +233,7 @@ BuildResult build_tree(const WordList& wl, const PatternMatrix& pm,
         auto buckets = EntropySolver::partition(set, guess, pm);
         for (Pattern p = 0; p < PATTERN_COUNT; ++p) {
             if (p == PATTERN_SOLVED || buckets[p].empty()) continue;
-            uint32_t child = emit(buckets[p], budget - 1, WordList::NPOS);
+            NodeId child = emit(buckets[p], budget - 1, WordList::NPOS);
             if (auto r = db.insert_edge(id, p, child); !r) die(r.error());
         }
         return id;
@@ -394,7 +394,7 @@ int main(int argc, char** argv) {
     std::println("ok");
 
     // Answer indices (the optimisation objective set).
-    std::vector<uint16_t> answer_indices;
+    std::vector<WordIndex> answer_indices;
     for (auto& w : ans->span()) {
         auto idx = wl->index_of(w.view());
         if (idx != WordList::NPOS) answer_indices.push_back(idx);
@@ -408,7 +408,7 @@ int main(int argc, char** argv) {
     if (start_word.empty() && full_mode)
         start_word = "tares";
 
-    uint16_t fixed_root = WordList::NPOS;
+    WordIndex fixed_root = WordList::NPOS;
     if (!start_word.empty()) {
         fixed_root = wl->index_of(start_word);
         if (fixed_root == WordList::NPOS)

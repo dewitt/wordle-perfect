@@ -32,10 +32,10 @@ PatternMatrix PatternMatrix::build(const WordList& words, unsigned nthreads) {
 
         threads.emplace_back([&pm, &words, n, row_start, row_end] {
             for (std::size_t gi = row_start; gi < row_end; ++gi) {
-                auto gv = words[static_cast<uint16_t>(gi)].view();
+                auto gv = words[static_cast<WordIndex>(gi)].view();
                 for (std::size_t ai = 0; ai < n; ++ai) {
                     pm.data_[gi * n + ai] =
-                        compute_pattern(gv, words[static_cast<uint16_t>(ai)].view());
+                        compute_pattern(gv, words[static_cast<WordIndex>(ai)].view());
                 }
             }
         });
@@ -48,12 +48,12 @@ PatternMatrix PatternMatrix::build(const WordList& words, unsigned nthreads) {
 // ---------------------------------------------------------------------------
 // EntropySolver::partition
 // ---------------------------------------------------------------------------
-std::array<std::vector<uint16_t>, PATTERN_COUNT>
-EntropySolver::partition(std::span<const uint16_t> candidates,
-                         uint16_t                  guess_idx,
-                         const PatternMatrix&      pm) {
-    std::array<std::vector<uint16_t>, PATTERN_COUNT> buckets;
-    for (uint16_t ai : candidates) {
+std::array<std::vector<WordIndex>, PATTERN_COUNT>
+EntropySolver::partition(std::span<const WordIndex> candidates,
+                         WordIndex                  guess_idx,
+                         const PatternMatrix&       pm) {
+    std::array<std::vector<WordIndex>, PATTERN_COUNT> buckets;
+    for (WordIndex ai : candidates) {
         buckets[pm.get(guess_idx, ai)].push_back(ai);
     }
     return buckets;
@@ -62,13 +62,13 @@ EntropySolver::partition(std::span<const uint16_t> candidates,
 // ---------------------------------------------------------------------------
 // EntropySolver::entropy (private) — weighted Shannon entropy
 // ---------------------------------------------------------------------------
-double EntropySolver::entropy(std::span<const uint16_t> candidates,
-                              uint16_t                  guess_idx,
-                              const PatternMatrix&      pm) const noexcept {
+double EntropySolver::entropy(std::span<const WordIndex> candidates,
+                              WordIndex                  guess_idx,
+                              const PatternMatrix&       pm) const noexcept {
     std::array<double, PATTERN_COUNT> bucket_weight{};
     double total_weight = 0.0;
 
-    for (uint16_t ai : candidates) {
+    for (WordIndex ai : candidates) {
         double w = weight_of(ai);
         bucket_weight[pm.get(guess_idx, ai)] += w;
         total_weight += w;
@@ -89,8 +89,8 @@ double EntropySolver::entropy(std::span<const uint16_t> candidates,
 // ---------------------------------------------------------------------------
 // EntropySolver::best_guess
 // ---------------------------------------------------------------------------
-uint16_t EntropySolver::best_guess(std::span<const uint16_t> candidates,
-                                   bool                      restrict_to_candidates) const {
+WordIndex EntropySolver::best_guess(std::span<const WordIndex> candidates,
+                                    bool                       restrict_to_candidates) const {
     if (candidates.empty()) return WordList::NPOS;
     if (candidates.size() == 1) return candidates[0];
 
@@ -98,8 +98,8 @@ uint16_t EntropySolver::best_guess(std::span<const uint16_t> candidates,
     if (candidates.size() == 2) return candidates[0];
 
     // Determine which pool of words to search
-    std::vector<uint16_t> all_idx;
-    std::span<const uint16_t> guess_pool;
+    std::vector<WordIndex> all_idx;
+    std::span<const WordIndex> guess_pool;
 
     if (restrict_to_candidates) {
         guess_pool = candidates;
@@ -108,15 +108,15 @@ uint16_t EntropySolver::best_guess(std::span<const uint16_t> candidates,
         guess_pool = all_idx;
     }
 
-    double   best_H            = -1.0;
-    uint16_t best_word         = candidates[0];  // fallback
+    double    best_H            = -1.0;
+    WordIndex best_word         = candidates[0];  // fallback
     // Track best_word's candidacy as state instead of re-running binary_search
     // on it every iteration; only recomputed when best_word changes.
-    bool     best_is_candidate = std::ranges::binary_search(candidates, best_word);
+    bool      best_is_candidate = std::ranges::binary_search(candidates, best_word);
 
     // Prefer guesses that are themselves still candidates (breaks ties toward
     // an answer rather than a pure information guess)
-    for (uint16_t gi : guess_pool) {
+    for (WordIndex gi : guess_pool) {
         double H = entropy(candidates, gi, patterns_);
 
         // Tie-break: prefer a candidate over a non-candidate for equal entropy
@@ -136,12 +136,12 @@ uint16_t EntropySolver::best_guess(std::span<const uint16_t> candidates,
 // ---------------------------------------------------------------------------
 // EntropySolver::solve
 // ---------------------------------------------------------------------------
-SolveResult EntropySolver::solve(uint16_t answer_idx, int max_rounds) const {
+SolveResult EntropySolver::solve(WordIndex answer_idx, int max_rounds) const {
     SolveResult result;
-    std::vector<uint16_t> candidates = words_.all_indices();
+    std::vector<WordIndex> candidates = words_.all_indices();
 
     for (int round = 0; round < max_rounds; ++round) {
-        uint16_t guess_idx = best_guess(candidates);
+        WordIndex guess_idx = best_guess(candidates);
         if (guess_idx == WordList::NPOS) break;
 
         Pattern p = patterns_.get(guess_idx, answer_idx);
@@ -164,10 +164,10 @@ SolveResult EntropySolver::solve(uint16_t answer_idx, int max_rounds) const {
 // Worst-case-bounded tree construction: is_feasible / best_guess_feasible
 // ---------------------------------------------------------------------------
 namespace {
-std::uint64_t feas_hash(std::span<const uint16_t> s, int depth) {
+std::uint64_t feas_hash(std::span<const WordIndex> s, int depth) {
     std::uint64_t h = 1469598103934665603ULL;
     auto mix = [&](std::uint64_t x){ h ^= x; h *= 1099511628211ULL; };
-    for (uint16_t v : s) mix(v + 1u);
+    for (WordIndex v : s) mix(v + 1u);
     mix(0x5A17u);
     mix(static_cast<std::uint64_t>(depth));
     return h;
@@ -179,13 +179,13 @@ std::uint64_t feas_hash(std::span<const uint16_t> s, int depth) {
 // feasibility node — so it avoids per-call allocation and avoids zeroing all
 // 243 buckets every time (the candidate set usually touches far fewer).
 [[gnu::hot]] int max_bucket_size(const PatternMatrix& pm,
-                                 std::span<const uint16_t> candidates,
-                                 uint16_t gi) noexcept {
-    thread_local std::array<uint16_t, PATTERN_COUNT> hist{};   // stays zeroed between calls
+                                 std::span<const WordIndex> candidates,
+                                 WordIndex gi) noexcept {
+    thread_local std::array<uint16_t, PATTERN_COUNT> hist{};   // bucket COUNTS; stays zeroed between calls
     Pattern seen[PATTERN_COUNT];   // distinct patterns touched (≤ 243)
     int nseen = 0;
     int mb = 0;
-    for (uint16_t ai : candidates) {
+    for (WordIndex ai : candidates) {
         const Pattern p = pm.get(gi, ai);
         const int c = ++hist[p];
         if (c == 1) seen[nseen++] = p;   // first time we hit this bucket
@@ -200,12 +200,12 @@ std::uint64_t feas_hash(std::span<const uint16_t> s, int depth) {
 // histogram twice (once for the no-progress filter, once for entropy).
 struct GuessScore { int max_bucket; double entropy; };
 [[gnu::hot]] GuessScore score_guess(const PatternMatrix& pm,
-                                    std::span<const uint16_t> candidates,
-                                    uint16_t gi) noexcept {
-    thread_local std::array<uint16_t, PATTERN_COUNT> hist{};
+                                    std::span<const WordIndex> candidates,
+                                    WordIndex gi) noexcept {
+    thread_local std::array<uint16_t, PATTERN_COUNT> hist{};  // bucket COUNTS
     Pattern seen[PATTERN_COUNT];
     int nseen = 0, mb = 0;
-    for (uint16_t ai : candidates) {
+    for (WordIndex ai : candidates) {
         const Pattern p = pm.get(gi, ai);
         const int c = ++hist[p];
         if (c == 1) seen[nseen++] = p;
@@ -223,8 +223,8 @@ struct GuessScore { int max_bucket; double entropy; };
 }
 }  // namespace
 
-bool EntropySolver::is_feasible(std::span<const uint16_t> candidates, int depth,
-                                uint16_t* witness) const {
+bool EntropySolver::is_feasible(std::span<const WordIndex> candidates, int depth,
+                                WordIndex* witness) const {
     ++stats_.feasible_calls;
     const int n = static_cast<int>(candidates.size());
     if (n <= 1) { if (witness && n == 1) *witness = candidates[0]; return true; }
@@ -264,16 +264,16 @@ bool EntropySolver::is_feasible(std::span<const uint16_t> candidates, int depth,
     // When depth-1 == 1 (depth==2) only mb==1 guesses can work, so the search
     // stops at the first mb>1; the bounded prefix already covers that.
     const std::size_t W = words_.size();
-    std::vector<std::pair<int, uint16_t>> order;
+    std::vector<std::pair<int, WordIndex>> order;
     order.reserve(W);
     for (std::size_t g = 0; g < W; ++g) {
-        const auto gi = static_cast<uint16_t>(g);
+        const auto gi = static_cast<WordIndex>(g);
         const int mb = max_bucket_size(patterns_, candidates, gi);
         if (mb == n) continue;  // no progress
         order.emplace_back(mb, gi);
     }
-    constexpr auto by_rank = [](const std::pair<int,uint16_t>& a,
-                                const std::pair<int,uint16_t>& b){
+    constexpr auto by_rank = [](const std::pair<int,WordIndex>& a,
+                                const std::pair<int,WordIndex>& b){
         if (a.first != b.first) return a.first < b.first;
         return a.second < b.second;
     };
@@ -283,7 +283,7 @@ bool EntropySolver::is_feasible(std::span<const uint16_t> candidates, int depth,
                               by_rank);
 
     bool ok = false;
-    uint16_t chosen = WordList::NPOS;
+    WordIndex chosen = WordList::NPOS;
     for (std::size_t i = 0; i < order.size(); ++i) {
         if (i == sorted_upto) {  // exhausted the partially-sorted prefix
             std::ranges::sort(order.begin() + static_cast<std::ptrdiff_t>(sorted_upto),
@@ -320,7 +320,7 @@ bool EntropySolver::is_feasible(std::span<const uint16_t> candidates, int depth,
     return ok;
 }
 
-int EntropySolver::feasible_total(std::span<const uint16_t> candidates,
+int EntropySolver::feasible_total(std::span<const WordIndex> candidates,
                                   int budget) const {
     const int n = static_cast<int>(candidates.size());
     if (n == 0) return 0;
@@ -328,7 +328,7 @@ int EntropySolver::feasible_total(std::span<const uint16_t> candidates,
     if (budget <= 1) return std::numeric_limits<int>::max();
 
     // Pick the highest-entropy feasible guess (lookahead 1) and accumulate.
-    uint16_t gi = best_guess_feasible(candidates, budget, /*lookahead=*/1);
+    WordIndex gi = best_guess_feasible(candidates, budget, /*lookahead=*/1);
     if (gi == WordList::NPOS) return std::numeric_limits<int>::max();
 
     auto buckets = partition(candidates, gi, patterns_);
@@ -342,8 +342,8 @@ int EntropySolver::feasible_total(std::span<const uint16_t> candidates,
     return total;
 }
 
-int EntropySolver::tree_total_for_opener(std::span<const uint16_t> candidates,
-                                         uint16_t opener, int budget,
+int EntropySolver::tree_total_for_opener(std::span<const WordIndex> candidates,
+                                         WordIndex opener, int budget,
                                          std::size_t lookahead) const {
     const int n = static_cast<int>(candidates.size());
     if (n == 0) return 0;
@@ -368,7 +368,7 @@ int EntropySolver::tree_total_for_opener(std::span<const uint16_t> candidates,
         if (b.size() == 1) { total += 1; continue; }
         if (lookahead > 1) {
             // descend choosing best_guess_feasible with lookahead at each node
-            uint16_t g = best_guess_feasible(b, budget - 1, lookahead);
+            WordIndex g = best_guess_feasible(b, budget - 1, lookahead);
             if (g == WordList::NPOS) return std::numeric_limits<int>::max();
             total += tree_total_for_opener(b, g, budget - 1, lookahead);
         } else {
@@ -378,9 +378,9 @@ int EntropySolver::tree_total_for_opener(std::span<const uint16_t> candidates,
     return total;
 }
 
-uint16_t EntropySolver::best_guess_feasible(std::span<const uint16_t> candidates,
-                                            int budget,
-                                            std::size_t lookahead) const {
+WordIndex EntropySolver::best_guess_feasible(std::span<const WordIndex> candidates,
+                                             int budget,
+                                             std::size_t lookahead) const {
     ++stats_.choice_calls;
     const int n = static_cast<int>(candidates.size());
     if (n == 0) return WordList::NPOS;
@@ -400,7 +400,7 @@ uint16_t EntropySolver::best_guess_feasible(std::span<const uint16_t> candidates
     // Guarantee a feasible fallback exists (and warm the feasibility memo for
     // this set). The witness is a guess that keeps every bucket solvable within
     // budget; if the set isn't feasible at all, bail.
-    uint16_t witness = WordList::NPOS;
+    WordIndex witness = WordList::NPOS;
     if (!is_feasible(candidates, budget, &witness)) {
         feas_choice_[ckey] = WordList::NPOS;
         return WordList::NPOS;
@@ -412,10 +412,10 @@ uint16_t EntropySolver::best_guess_feasible(std::span<const uint16_t> candidates
     // words. The witness guarantees we always have a feasible choice.
     constexpr std::size_t EXPLORE_POOL = 80;
     const std::size_t W = words_.size();
-    std::vector<std::pair<double, uint16_t>> order;
+    std::vector<std::pair<double, WordIndex>> order;
     order.reserve(W);
     for (std::size_t g = 0; g < W; ++g) {
-        const auto gi = static_cast<uint16_t>(g);
+        const auto gi = static_cast<WordIndex>(g);
         const auto sc = score_guess(patterns_, candidates, gi);
         if (sc.max_bucket == n) continue;  // no progress
         order.emplace_back(sc.entropy, gi);
@@ -429,8 +429,8 @@ uint16_t EntropySolver::best_guess_feasible(std::span<const uint16_t> candidates
     order.resize(pool);
 
     // Expand up to `lookahead` feasible guesses; keep the one with lowest total.
-    uint16_t best_gi = WordList::NPOS;
-    int      best_total = std::numeric_limits<int>::max();
+    WordIndex best_gi = WordList::NPOS;
+    int       best_total = std::numeric_limits<int>::max();
     std::size_t expanded = 0;
 
     for (auto& [H, gi] : order) {

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "pattern.hpp"
+#include "wordlist.hpp"   // WordIndex
 
 #include <cstdint>
 #include <expected>
@@ -49,7 +50,7 @@ public:
 
     // Score every guess (0..N-1) against `candidates`. Result indexed by guess.
     [[nodiscard]] std::expected<std::vector<GuessScore>, std::string>
-    score_all(std::span<const std::uint16_t> candidates) const;
+    score_all(std::span<const WordIndex> candidates) const;
 
     [[nodiscard]] std::uint32_t n() const noexcept { return n_; }
 

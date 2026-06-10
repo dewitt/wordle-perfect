@@ -27,7 +27,7 @@ namespace wp {
 // ---------------------------------------------------------------------------
 class FeasibilityCache {
 public:
-    struct Entry { char status; uint16_t witness; };
+    struct Entry { char status; WordIndex witness; };
 
     // Returns the cached entry for `key`, or nullopt. Cheap shared-path lock.
     [[nodiscard]] bool get(std::uint64_t key, Entry& out) const {
@@ -94,8 +94,8 @@ private:
 // SolveStep / SolveResult
 // ---------------------------------------------------------------------------
 struct SolveStep {
-    uint16_t word_idx;   // index into the WordList
-    Pattern  response;   // the pattern returned for this guess
+    WordIndex word_idx;  // index into the WordList
+    Pattern   response;  // the pattern returned for this guess
 };
 
 struct SolveResult {
@@ -125,7 +125,7 @@ class EntropySolver {
 public:
     // weight_fn(word_idx) → weight for that word. Default: uniform weight 1.
     // Answer-weighted: return 1000 if word is in answers list, 1 otherwise.
-    using WeightFn = std::function<double(uint16_t)>;
+    using WeightFn = std::function<double(WordIndex)>;
 
     explicit EntropySolver(const WordList& words, const PatternMatrix& patterns,
                            WeightFn weight_fn = {})
@@ -139,16 +139,16 @@ public:
     }
 
     // Partition `candidates` by their pattern against `guess_idx`.
-    [[nodiscard]] static std::array<std::vector<uint16_t>, PATTERN_COUNT>
-    partition(std::span<const uint16_t> candidates,
-              uint16_t                  guess_idx,
-              const PatternMatrix&      pm);
+    [[nodiscard]] static std::array<std::vector<WordIndex>, PATTERN_COUNT>
+    partition(std::span<const WordIndex> candidates,
+              WordIndex                  guess_idx,
+              const PatternMatrix&       pm);
 
     // Best guess from the full word list (or restricted to candidates if
     // restrict_to_candidates == true). Returns NPOS on empty candidates.
-    [[nodiscard]] uint16_t best_guess(
-        std::span<const uint16_t> candidates,
-        bool                      restrict_to_candidates = false) const;
+    [[nodiscard]] WordIndex best_guess(
+        std::span<const WordIndex> candidates,
+        bool                       restrict_to_candidates = false) const;
 
     // Default round budget for the dynamic solve() method. The standard Wordle
     // game allows 6 guesses; full-coverage DBs may need up to 8.
@@ -161,8 +161,8 @@ public:
     // memoization on the sorted candidate set and max-bucket guess ordering.
     // Optionally returns a witness guess that keeps every bucket feasible.
     [[nodiscard]] bool
-    is_feasible(std::span<const uint16_t> candidates, int depth,
-                uint16_t* witness = nullptr) const;
+    is_feasible(std::span<const WordIndex> candidates, int depth,
+                WordIndex* witness = nullptr) const;
 
     // best_guess_feasible: among guesses whose every resulting bucket is
     // feasible at depth-1, pick the highest-entropy one (low-mean heuristic),
@@ -172,8 +172,8 @@ public:
     //
     // `lookahead` > 1 expands the top-N feasible guesses and keeps the one whose
     // greedy continuation yields the lowest total depth (better mean).
-    [[nodiscard]] uint16_t
-    best_guess_feasible(std::span<const uint16_t> candidates, int budget,
+    [[nodiscard]] WordIndex
+    best_guess_feasible(std::span<const WordIndex> candidates, int budget,
                         std::size_t lookahead = 1) const;
 
     // Total depth (Σ over candidates, direct hit = 1) of the feasibility-
@@ -183,14 +183,14 @@ public:
     // each thread must use its own EntropySolver instance (the feasibility memo
     // is per-instance, not shared).
     [[nodiscard]] int
-    tree_total_for_opener(std::span<const uint16_t> candidates,
-                          uint16_t opener, int budget,
+    tree_total_for_opener(std::span<const WordIndex> candidates,
+                          WordIndex opener, int budget,
                           std::size_t lookahead = 1) const;
 
     // Solve for a known target word, returning the full step sequence.
     // answer_idx must be a valid index into the WordList.
     // max_rounds caps the search; defaults to DEFAULT_MAX_ROUNDS (6).
-    [[nodiscard]] SolveResult solve(uint16_t answer_idx,
+    [[nodiscard]] SolveResult solve(WordIndex answer_idx,
                                     int max_rounds = DEFAULT_MAX_ROUNDS) const;
 
     // ── Instrumentation (builder performance, issue #28) ─────────────────────
@@ -211,34 +211,34 @@ public:
 private:
     // Compute weighted Shannon entropy.
     [[nodiscard]] double entropy(
-        std::span<const uint16_t> candidates,
-        uint16_t                  guess_idx,
-        const PatternMatrix&      pm) const noexcept;
+        std::span<const WordIndex> candidates,
+        WordIndex                  guess_idx,
+        const PatternMatrix&       pm) const noexcept;
 
     const WordList&      words_;
     const PatternMatrix& patterns_;
     WeightFn             weight_fn_;  // null → uniform weight
 
-    double weight_of(uint16_t idx) const noexcept {
+    double weight_of(WordIndex idx) const noexcept {
         return weight_fn_ ? weight_fn_(idx) : 1.0;
     }
 
     // Feasibility memo for is_feasible(): key = hash(sorted candidate set, depth)
     // → 1 feasible / 2 infeasible, plus a witness guess. Mutable so the public
     // const API can cache.  Cleared lazily is unnecessary; lives for the solver.
-    mutable std::unordered_map<std::uint64_t, char>     feas_memo_;
-    mutable std::unordered_map<std::uint64_t, uint16_t> feas_witness_;
+    mutable std::unordered_map<std::uint64_t, char>      feas_memo_;
+    mutable std::unordered_map<std::uint64_t, WordIndex> feas_witness_;
     // Cache of best_guess_feasible's chosen guess per (candidate set, budget),
     // so the production build (which calls it once per node) doesn't recompute
     // the full-vocabulary entropy ranking for recurring candidate sets.
-    mutable std::unordered_map<std::uint64_t, uint16_t> feas_choice_;
+    mutable std::unordered_map<std::uint64_t, WordIndex> feas_choice_;
     // Optional cross-instance feasibility cache (set via set_feasibility_cache);
     // when non-null it supersedes feas_memo_/feas_witness_ for is_feasible().
     FeasibilityCache* shared_feas_{nullptr};
     mutable Stats stats_;
     // Total depth (sum over candidates, direct hit = 1) under the entropy-greedy
     // feasible policy; used by best_guess_feasible's lookahead tie-break.
-    [[nodiscard]] int feasible_total(std::span<const uint16_t> candidates,
+    [[nodiscard]] int feasible_total(std::span<const WordIndex> candidates,
                                      int budget) const;
 };
 

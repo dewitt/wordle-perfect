@@ -130,6 +130,6 @@ TEST_CASE("WordList::all_indices - size and content", "[wordlist]") {
     auto idx = wl->all_indices();
     CHECK(idx.size() == wl->size());
     for (std::size_t i = 0; i < idx.size(); ++i) {
-        CHECK(idx[i] == static_cast<uint16_t>(i));
+        CHECK(idx[i] == static_cast<WordIndex>(i));
     }
 }

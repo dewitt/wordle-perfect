@@ -12,6 +12,11 @@ namespace wp {
 
 inline constexpr int WORD_LEN = 5;
 
+// Index into a WordList. Word indices are stored as uint16_t throughout (the
+// list is capped at 65,535 entries), so this alias documents that role without
+// changing any layout.
+using WordIndex = std::uint16_t;
+
 // ---------------------------------------------------------------------------
 // Word — exactly 5 lowercase ASCII letters
 // ---------------------------------------------------------------------------
@@ -36,23 +41,23 @@ struct Word {
 // ---------------------------------------------------------------------------
 class WordList {
 public:
-    static constexpr uint16_t NPOS = UINT16_MAX;
+    static constexpr WordIndex NPOS = UINT16_MAX;
 
     static std::expected<WordList, std::string> load(std::string_view path);
 
-    [[nodiscard]] std::size_t           size()                    const noexcept { return words_.size(); }
-    [[nodiscard]] bool                  empty()                   const noexcept { return words_.empty(); }
-    [[nodiscard]] const Word&           operator[](uint16_t idx)  const noexcept { return words_[idx]; }
-    [[nodiscard]] std::span<const Word> span()                    const noexcept { return words_; }
+    [[nodiscard]] std::size_t           size()                     const noexcept { return words_.size(); }
+    [[nodiscard]] bool                  empty()                    const noexcept { return words_.empty(); }
+    [[nodiscard]] const Word&           operator[](WordIndex idx)  const noexcept { return words_[idx]; }
+    [[nodiscard]] std::span<const Word> span()                     const noexcept { return words_; }
 
     // Binary search — words_ is kept sorted by load()
-    [[nodiscard]] uint16_t index_of(std::string_view word) const noexcept;
-    [[nodiscard]] bool     contains(std::string_view word) const noexcept {
+    [[nodiscard]] WordIndex index_of(std::string_view word) const noexcept;
+    [[nodiscard]] bool      contains(std::string_view word) const noexcept {
         return index_of(word) != NPOS;
     }
 
     // Build a parallel index list (all indices) for use as initial candidate set
-    [[nodiscard]] std::vector<uint16_t> all_indices() const;
+    [[nodiscard]] std::vector<WordIndex> all_indices() const;
 
 private:
     std::vector<Word> words_;

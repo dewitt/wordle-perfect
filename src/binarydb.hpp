@@ -51,8 +51,8 @@ namespace wp {
 // ---------------------------------------------------------------------------
 class BinaryDb {
 public:
-    static constexpr uint32_t NULL_NODE = UINT32_MAX;
-    static constexpr uint32_t ROOT_ID   = 0;
+    static constexpr NodeId NULL_NODE = UINT32_MAX;
+    static constexpr NodeId ROOT_ID   = 0;
     static constexpr uint64_t MAGIC     = 0x00424454'4e494250ULL;  // "PBINTDB\0"-ish
     static constexpr uint32_t VERSION   = 1;
 
@@ -78,14 +78,14 @@ public:
     // current node + pattern → child node id. Returns NULL_NODE for GGGGG or a
     // missing edge (mirrors next_node semantics enough for the CLI walk, which
     // checks PATTERN_SOLVED before calling).
-    [[nodiscard]] std::expected<uint32_t, std::string>
-    next_node(uint32_t node_id, Pattern pattern) const;
+    [[nodiscard]] std::expected<NodeId, std::string>
+    next_node(NodeId node_id, Pattern pattern) const;
 
     // word_idx + depth for a node.
-    [[nodiscard]] std::expected<std::pair<uint16_t, Depth>, std::string>
-    node_info(uint32_t node_id) const;
+    [[nodiscard]] std::expected<std::pair<WordIndex, Depth>, std::string>
+    node_info(NodeId node_id) const;
 
-    [[nodiscard]] std::expected<uint16_t, std::string> root_word() const;
+    [[nodiscard]] std::expected<WordIndex, std::string> root_word() const;
 
     // Human-readable dump of nodes + edges (satisfies the spec debug_dump_tool
     // invariant for the proprietary binary format).
