@@ -3,6 +3,9 @@
 #include "solver.hpp"
 #include "database.hpp"
 #include "binarydb.hpp"
+#include "progress.hpp"
+
+#include <optional>
 
 #include <algorithm>
 #include <chrono>
@@ -77,6 +80,7 @@ struct TreeBuilder {
     uint64_t nodes_written{0};
     int      max_depth_seen{0};
     uint64_t minimax_calls{0};
+    std::optional<Progress> progress;  // live build progress (node count unknown up front)
 
     TreeBuilder(const WordList& w, const PatternMatrix& p, Database& d, unsigned t,
                 EntropySolver::WeightFn wf = {}, uint16_t fixed_root = WordList::NPOS,
@@ -93,8 +97,12 @@ struct TreeBuilder {
         // Wrapping in one transaction turns ~16k individual auto-commits into a
         // single fsync — reduces build time by 100x–1000x on SQLite.
         if (auto r = db.begin_transaction(); !r) die(r.error());
+        // The total node count is unknown until the depth-first build finishes,
+        // so this is an indeterminate spinner (live node count + rate).
+        progress.emplace("  building tree");
         auto all_candidates = words.all_indices();
         uint32_t root = build_node(all_candidates, 1);
+        progress->finish(nodes_written);
         if (auto r = db.commit_transaction(); !r) die(r.error());
         return root;
     }
@@ -138,7 +146,6 @@ private:
             // repeated-letter trap clusters that leave depth-6 paths.
             const int budget = std::max(1, target_depth + 1 - depth);
             bool escalated = false;
-            auto mm_t0 = Clock::now();
             if (depth < min_escalation_depth) {
                 // Too shallow to escalate (very large sets, costly probe with
                 // little payoff): take the plain greedy guess.
@@ -148,22 +155,16 @@ private:
                     candidates, budget, &escalated,
                     EntropySolver::ESCALATE_MAX_CANDIDATES, beam_width);
             }
-            if (escalated) {
-                ++minimax_calls;
-                double mm_e = elapsed_s(mm_t0);
-                if (mm_e > 0.05 || minimax_calls <= 5) {
-                    std::println(stderr, "[mm #{} d={} c={} b={} t={:.3f}s]",
-                        minimax_calls, depth, candidates.size(), budget, mm_e);
-                }
-            }
+            // (Per-escalation [mm] diagnostics removed: the live progress bar
+            // now provides build feedback and would corrupt the \r line.)
+            if (escalated) ++minimax_calls;  // counted for the build summary
         }
 
         // Insert node
         auto r = db.insert_node(my_id, guess_idx, static_cast<uint8_t>(depth));
         if (!r) die(r.error());
         ++nodes_written;
-        if (optimal_mode && nodes_written % 1000 == 0)
-            std::println(stderr, "[optimal] {} nodes written...", nodes_written);
+        if (progress) progress->update(nodes_written);  // throttled internally
         if (depth > max_depth_seen) max_depth_seen = depth;
 
         // Partition candidates by pattern against this guess
@@ -203,9 +204,13 @@ evaluate(const Database& db, const WordList& words, const WordList& answers) {
     double total = 0.0;
     EvalResult res{};
 
+    // The answer count is known up front → a true percentage bar.
+    Progress prog{"  evaluating", static_cast<std::uint64_t>(answers.span().size())};
+    std::uint64_t processed = 0;
+
     for (auto& w : answers.span()) {
         auto idx = words.index_of(w.view());
-        if (idx == WordList::NPOS) continue;
+        if (idx == WordList::NPOS) { prog.update(++processed); continue; }
 
         // Shared walk: generous cap so deep-but-valid paths report their true
         // depth instead of being misclassified as failures.
@@ -221,7 +226,9 @@ evaluate(const Database& db, const WordList& words, const WordList& answers) {
         } else {
             ++res.failures;
         }
+        prog.update(++processed);
     }
+    prog.finish(processed);
 
     res.mean = res.solved > 0 ? total / res.solved : 0.0;
     return res;
@@ -413,10 +420,9 @@ int main(int argc, char** argv) {
         elapsed_s(t0), builder.nodes_written, builder.max_depth_seen);
 
     // ── Evaluate (no depth cap — real worst case) ─────────────────────────
-    std::print("evaluating against {} answers... ", ans->size());
-    std::cout.flush();
+    std::println("evaluating against {} answers...", ans->size());
     auto ev = evaluate(*db, *wl, *ans);
-    std::println("worst={} mean={:.4f} solved={} failures={}",
+    std::println("evaluation: worst={} mean={:.4f} solved={} failures={}",
         ev.worst, ev.mean, ev.solved, ev.failures);
 
     // ── Finalize ──────────────────────────────────────────────────────────
