@@ -1,21 +1,26 @@
-// build_db — the single Wordle decision-tree builder.
+// build_db — the Wordle decision-tree builder.
 //
-// Strategies (--strategy):
-//   optimal  (default) : provably worst-case-optimal tree. A parallel opener
-//                        sweep (feasibility-constrained, multi-threaded) picks
-//                        the opener with the lowest mean among trees that solve
-//                        every answer within the worst-case bound, then emits
-//                        that tree. This is the best-known builder.
-//   legacy             : answer-weighted entropy + budget-aware minimax/beam
-//                        escalation. Faster but worst-case 6 (vs optimal's 5).
+// Builds a tree that solves every answer within the smallest worst-case depth
+// the search can prove reachable (5 for the curated answer set — provably
+// optimal; 4 is impossible), then minimises the mean among such trees. A
+// parallel opener sweep (feasibility-constrained, multi-threaded) picks the
+// lowest-mean opener; the chosen tree is emitted and independently verified.
 //
-// Modifiers:
+// NOTE on the worst-case-5 claim: minimising the *worst case* to 5 is provably
+// optimal for the curated set. The *mean* (≈3.49) is NOT claimed optimal — the
+// feasibility-constrained entropy policy is a strong heuristic, not exhaustive
+// mean-optimal DP. So we avoid calling the builder itself "optimal".
+//
+// Flags:
 //   --full             : cover every guess word as an answer (worst-case 7).
 //   --start-word W     : force the opener (skips the sweep).
-//   --lookahead K      : optimal-strategy mean refinement (expand top-K feasible
-//                        guesses per node; higher K → lower mean, slower).
-//   --top M            : optimal-strategy sweep only the top-M openers by
-//                        entropy (default: a sensible cap; 0 = all).
+//   --lookahead K      : mean refinement on the chosen opener's tree (expand
+//                        top-K feasible guesses per node; higher K → lower mean,
+//                        slower). Default 1.
+//   --sweep-lookahead K: lookahead used while ranking openers (default 1; the
+//                        sweep runs it per-opener, so keep it cheap).
+//   --top M            : sweep only the top-M openers by entropy (default 50;
+//                        0 = all openers).
 //   --jobs N           : worker threads for the parallel sweep / matrix build.
 //
 // Every build is independently verified by an evaluate() pass (the stored
@@ -90,82 +95,7 @@ double entropy_of(const PatternMatrix& pm, const std::vector<uint16_t>& cand, ui
 }
 
 // ---------------------------------------------------------------------------
-// Legacy builder: answer-weighted entropy + budget-aware minimax/beam.
-// Depth-first, single-threaded DB writes, parallel root search.
-// ---------------------------------------------------------------------------
-struct LegacyBuilder {
-    const WordList&         words;
-    const PatternMatrix&    pm;
-    Database&               db;
-    EntropySolver           solver;
-    unsigned                nthreads;
-    EntropySolver::WeightFn weight_fn;
-    uint16_t                fixed_root;
-    int                     target_depth;
-    int                     min_escalation_depth;
-    std::size_t             beam_width;
-
-    uint32_t next_id{0};
-    uint64_t nodes_written{0};
-    int      max_depth_seen{0};
-    std::optional<Progress> progress;
-
-    LegacyBuilder(const WordList& w, const PatternMatrix& p, Database& d, unsigned t,
-                  EntropySolver::WeightFn wf, uint16_t root, int td, int med,
-                  std::size_t bw)
-        : words{w}, pm{p}, db{d}, solver{w, p, wf}, nthreads{t}, weight_fn{wf},
-          fixed_root{root}, target_depth{td}, min_escalation_depth{med},
-          beam_width{bw} {}
-
-    uint32_t build() {
-        if (auto r = db.begin_transaction(); !r) die(r.error());
-        progress.emplace("  building tree", std::uint64_t{0}, "nodes");
-        auto all = words.all_indices();
-        uint32_t root = build_node(all, 1);
-        progress->finish(nodes_written);
-        if (auto r = db.commit_transaction(); !r) die(r.error());
-        return root;
-    }
-
-private:
-    uint32_t build_node(std::vector<uint16_t>& candidates, int depth) {
-        uint32_t my_id = next_id++;
-        uint16_t guess_idx;
-        if (depth == 1 && fixed_root != WordList::NPOS) {
-            guess_idx = fixed_root;
-        } else if (depth == 1) {
-            guess_idx = solver.best_guess_parallel(candidates, nthreads);
-        } else {
-            const int budget = std::max(1, target_depth + 1 - depth);
-            bool escalated = false;
-            if (depth < min_escalation_depth) {
-                guess_idx = solver.best_guess(candidates);
-            } else {
-                guess_idx = solver.best_guess_within_budget(
-                    candidates, budget, &escalated,
-                    EntropySolver::ESCALATE_MAX_CANDIDATES, beam_width);
-            }
-        }
-
-        auto r = db.insert_node(my_id, guess_idx, static_cast<uint8_t>(depth));
-        if (!r) die(r.error());
-        ++nodes_written;
-        if (progress) progress->update(nodes_written);
-        if (depth > max_depth_seen) max_depth_seen = depth;
-
-        auto buckets = EntropySolver::partition(candidates, guess_idx, pm);
-        for (Pattern p = 0; p < PATTERN_COUNT - 1; ++p) {  // skip GGGGG
-            auto& bucket = buckets[p];
-            if (bucket.empty()) continue;
-            uint32_t child_id = build_node(bucket, depth + 1);
-            if (auto re = db.insert_edge(my_id, p, child_id); !re) die(re.error());
-        }
-        return my_id;
-    }
-};
-
-// ---------------------------------------------------------------------------
-// Optimal builder: parallel feasibility-constrained opener sweep + emit.
+// Builder: parallel feasibility-constrained opener sweep + emit.
 //
 // 1. Rank openers by entropy; sweep the top `top` of them in parallel (each
 //    worker has its own EntropySolver / private feasibility memo, so no lock
@@ -180,13 +110,13 @@ private:
 // the sweep multiplies its cost by ~the lookahead and the opener count — a
 // 14,855-opener × lookahead-30 sweep is ~tens of hours. Keep the sweep at 1.
 // ---------------------------------------------------------------------------
-struct OptimalResult { uint16_t opener; std::uint64_t nodes; };
+struct BuildResult { uint16_t opener; std::uint64_t nodes; };
 
-OptimalResult build_optimal(const WordList& wl, const PatternMatrix& pm,
-                            Database& db, const std::vector<uint16_t>& cand,
-                            int worst_cap, std::size_t sweep_lookahead,
-                            std::size_t emit_lookahead, std::size_t top,
-                            uint16_t forced_root, unsigned nthreads) {
+BuildResult build_tree(const WordList& wl, const PatternMatrix& pm,
+                       Database& db, const std::vector<uint16_t>& cand,
+                       int worst_cap, std::size_t sweep_lookahead,
+                       std::size_t emit_lookahead, std::size_t top,
+                       uint16_t forced_root, unsigned nthreads) {
     const int n = static_cast<int>(cand.size());
 
     uint16_t opener = forced_root;
@@ -259,7 +189,7 @@ OptimalResult build_optimal(const WordList& wl, const PatternMatrix& pm,
             : (set.size() == 1 ? set[0]
                : solver.best_guess_feasible(set, budget, emit_lookahead));
         if (guess == WordList::NPOS)
-            die(std::format("optimal: no feasible guess (set {}, budget {})",
+            die(std::format("no feasible guess (set {}, budget {})",
                             set.size(), budget));
         uint8_t round = static_cast<uint8_t>(worst_cap - budget + 1);
         if (auto r = db.insert_node(id, guess, round); !r) die(r.error());
@@ -347,35 +277,27 @@ int main(int argc, char** argv) {
     const bool full_mode = has_flag("--full");
     const bool no_binary = has_flag("--no-binary");
 
-    std::string strategy = "optimal";              // optimal | legacy
     std::string start_word;
     std::string words_date_override;
     std::string binary_path;
     std::optional<std::string> answers_explicit;
-    double      answer_weight        = 1000.0;     // legacy only
-    int         min_escalation_depth = 2;          // legacy only
-    std::size_t beam_width           = EntropySolver::DEFAULT_BEAM_WIDTH;  // legacy only
-    // Two independent lookaheads (see build_optimal): the sweep ranks openers
+    // Two independent lookaheads (see build_tree): the sweep ranks openers
     // cheaply (default 1, runs per-opener), the emit refines only the winner's
     // tree (default 1; raise for a lower mean at modest cost). --top caps the
     // sweep to the top-N entropy openers so the default build is ~1 min, not
-    // hours — the optimal opener is reliably near the top of the entropy ranking.
+    // hours — the best opener is reliably near the top of the entropy ranking.
     std::size_t emit_lookahead       = 1;          // --lookahead (winner only)
     std::size_t sweep_lookahead      = 1;          // --sweep-lookahead (per opener)
     std::size_t top                  = 50;         // --top (0 = all openers)
-    int         target_depth         = 0;          // 0 = strategy default
+    int         target_depth         = 0;          // 0 = depth default
     bool        target_depth_explicit = false;
 
-    if (auto v = consume("--strategy");      !v.empty()) strategy            = v;
     if (auto v = consume("--words");         !v.empty()) words_path          = v;
     if (auto v = consume("--answers");       !v.empty()) answers_explicit    = std::string(v);
     if (auto v = consume("--output");        !v.empty()) out_path            = v;
     if (auto v = consume("--start-word");    !v.empty()) start_word          = v;
     if (auto v = consume("--date");          !v.empty()) words_date_override = v;
     if (auto v = consume("--binary");        !v.empty()) binary_path         = v;
-    if (auto v = consume("--answer-weight"); !v.empty()) answer_weight = std::stod(std::string(v));
-    if (auto v = consume("--min-escalation-depth"); !v.empty()) min_escalation_depth = std::stoi(std::string(v));
-    if (auto v = consume("--beam-width");    !v.empty()) beam_width = std::stoul(std::string(v));
     if (auto v = consume("--lookahead");       !v.empty()) emit_lookahead  = std::stoul(std::string(v));
     if (auto v = consume("--sweep-lookahead"); !v.empty()) sweep_lookahead = std::stoul(std::string(v));
     if (auto v = consume("--top");             !v.empty()) top             = std::stoul(std::string(v));
@@ -385,14 +307,9 @@ int main(int argc, char** argv) {
         if (nthreads == 0) nthreads = std::max(1u, std::thread::hardware_concurrency());
     }
 
-    if (strategy != "optimal" && strategy != "legacy")
-        die(std::format("unknown --strategy '{}' (use 'optimal' or 'legacy')", strategy));
-
-    // Worst-case target defaults: optimal answers=5, optimal full=7, legacy=6/8.
-    if (!target_depth_explicit) {
-        if (strategy == "legacy") target_depth = full_mode ? 8 : 6;
-        else                      target_depth = full_mode ? 7 : 5;
-    }
+    // Worst-case target defaults: curated answers = 5 (proven optimum),
+    // full coverage = 7.
+    if (!target_depth_explicit) target_depth = full_mode ? 7 : 5;
 
     // --full: answers = all words (unless --answers given explicitly).
     if (full_mode) answers_path = answers_explicit.value_or(words_path);
@@ -442,7 +359,7 @@ int main(int argc, char** argv) {
     // (each per-opener evaluation is heavy), and `tares` is the known-good
     // worst-7 opener, so default to it unless the user forces another. The
     // curated-answers build is cheap enough to always sweep.
-    if (start_word.empty() && full_mode && strategy == "optimal")
+    if (start_word.empty() && full_mode)
         start_word = "tares";
 
     uint16_t fixed_root = WordList::NPOS;
@@ -458,31 +375,19 @@ int main(int argc, char** argv) {
     }
 
     // ── Build ───────────────────────────────────────────────────────────────────
-    std::string strategy_label;
     std::uint64_t nodes_written = 0;
     t0 = Clock::now();
 
-    if (strategy == "optimal") {
-        std::println("building decision tree (strategy=optimal, worst<={}, emit-lookahead={}, {} threads)...",
-            target_depth, emit_lookahead, nthreads);
-        auto res = build_optimal(*wl, pm, *db, answer_indices, target_depth,
-                                 sweep_lookahead, emit_lookahead, top,
-                                 fixed_root, nthreads);
-        nodes_written = res.nodes;
-        strategy_label = std::format("optimal-worst{}-lookahead{}", target_depth, emit_lookahead);
-    } else {  // legacy
-        std::println("building decision tree (strategy=legacy, worst<={}, {} threads)...",
-            target_depth, nthreads);
-        EntropySolver::WeightFn weight_fn =
-            [&answer_indices, answer_weight](uint16_t idx) -> double {
-                return std::ranges::binary_search(answer_indices, idx) ? answer_weight : 1.0;
-            };
-        LegacyBuilder builder{*wl, pm, *db, nthreads, weight_fn, fixed_root,
-                              target_depth, min_escalation_depth, beam_width};
-        builder.build();
-        nodes_written = builder.nodes_written;
-        strategy_label = full_mode ? "full-coverage-legacy" : "answer-weighted-beam-v3";
-    }
+    std::println("building decision tree (worst<={}, emit-lookahead={}, {} threads)...",
+        target_depth, emit_lookahead, nthreads);
+    auto res = build_tree(*wl, pm, *db, answer_indices, target_depth,
+                          sweep_lookahead, emit_lookahead, top,
+                          fixed_root, nthreads);
+    nodes_written = res.nodes;
+    // Label records *what was done*, not a quality claim: "minimax" = worst-case
+    // minimised (provably optimal at 5); the mean is heuristic, not claimed optimal.
+    const std::string strategy_label =
+        std::format("minimax-worst{}-lookahead{}", target_depth, emit_lookahead);
     std::println("tree built in {:.1f}s  ({} nodes)", elapsed_s(t0), nodes_written);
 
     // ── Evaluate (independent verification → stored metadata) ─────────────────

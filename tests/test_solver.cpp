@@ -160,84 +160,6 @@ TEST_CASE("solve - solves all answer words within 6 guesses (sampled)", "[solver
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// EntropySolver::minimax_best_guess — worst-case depth optimizer
-// ─────────────────────────────────────────────────────────────────────────────
-
-TEST_CASE("minimax - single and empty candidate sets", "[solver][minimax]") {
-    auto wl = tiny_wordlist({"crane", "slate", "trail", "point", "black"});
-    auto pm = PatternMatrix::build(wl);
-    EntropySolver solver{wl, pm};
-
-    auto one = wl.index_of("crane");
-    auto [gi, depth] = solver.minimax_best_guess(std::span<const uint16_t>{&one, 1}, 6);
-    CHECK(gi == one);
-    CHECK(depth == 1);
-
-    std::vector<uint16_t> empty{};
-    auto [gi2, depth2] = solver.minimax_best_guess(empty, 6);
-    CHECK(gi2 == WordList::NPOS);
-    CHECK(depth2 == 0);
-}
-
-TEST_CASE("minimax - achieves the optimal worst-case depth (gi NPOS = use greedy)",
-          "[solver][minimax]") {
-    // A family that shares enough letters to be distinguishable in one probe.
-    // Guessing "slargt"-like overlapping words splits the set; the optimal
-    // worst case for these five is 2 (one informative guess, then the answer).
-    //
-    // Per the documented contract, minimax_best_guess returns {NPOS, depth}
-    // when greedy already achieves the optimum (no strict improvement). The
-    // depth is still the true optimal worst-case, and the caller falls back to
-    // best_guess() for the actual word.
-    auto wl = tiny_wordlist({"slate", "crane", "trace", "stare", "least"});
-    auto pm = PatternMatrix::build(wl);
-    EntropySolver solver{wl, pm};
-
-    auto all = wl.all_indices();
-    auto [gi, depth] = solver.minimax_best_guess(all, 6);
-    // Cross-check minimax against an independent end-to-end greedy solve of
-    // every word: minimax's reported worst-case must not exceed the greedy
-    // worst-case over the same set (it optimizes for exactly this).
-    int greedy_worst = 0;
-    for (uint16_t i : all) {
-        auto r = solver.solve(i);
-        REQUIRE(r.solved);
-        greedy_worst = std::max(greedy_worst, r.depth());
-    }
-    CHECK(depth <= greedy_worst);
-    CHECK(depth >= 2);  // 2+ candidates always need ≥ 2 guesses
-
-    // Resolve the actual guess: minimax's own pick, or the greedy fallback.
-    uint16_t chosen = (gi != WordList::NPOS) ? gi : solver.best_guess(all);
-    CHECK(chosen != WordList::NPOS);
-    CHECK(chosen < wl.size());
-}
-
-TEST_CASE("minimax - reported depth is a sane achievable bound on small sets",
-          "[solver][minimax]") {
-    // On the answers list, take a small candidate subset and confirm minimax's
-    // reported worst-case depth is within budget. gi may be NPOS (greedy already
-    // optimal) — that's the fall-back-to-greedy signal, not an error.
-    auto wl = WordList::load("data/answers.txt");
-    REQUIRE(wl.has_value());
-    auto pm = PatternMatrix::build(*wl);
-    EntropySolver solver{*wl, pm};
-
-    // Take the first MINIMAX_THRESHOLD answer indices as a candidate set.
-    std::vector<uint16_t> cand;
-    for (uint16_t i = 0; i < EntropySolver::MINIMAX_THRESHOLD; ++i)
-        cand.push_back(i);
-
-    auto [gi, mm_depth] = solver.minimax_best_guess(cand, 6);
-    CHECK(mm_depth >= 1);
-    CHECK(mm_depth <= 6);
-
-    // Whichever guess we end up using must be valid.
-    uint16_t chosen = (gi != WordList::NPOS) ? gi : solver.best_guess(cand);
-    CHECK(chosen != WordList::NPOS);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // any_consistent_word — solver-mode consistency check (#11)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -292,7 +214,7 @@ TEST_CASE("any_consistent_word - guess-only word as answer is rejected vs answer
 // is_feasible / best_guess_feasible — worst-case-bounded tree construction (#8)
 // ─────────────────────────────────────────────────────────────────────────────
 
-TEST_CASE("is_feasible - trivial sets", "[solver][optimal]") {
+TEST_CASE("is_feasible - trivial sets", "[solver][feasible]") {
     auto wl = tiny_wordlist({"crane", "slate", "trace"});
     auto pm = PatternMatrix::build(wl);
     EntropySolver solver{wl, pm};
@@ -306,7 +228,7 @@ TEST_CASE("is_feasible - trivial sets", "[solver][optimal]") {
 }
 
 TEST_CASE("is_feasible - answer set is solvable in 5 but not 4 (sampled)",
-          "[solver][optimal][slow]") {
+          "[solver][feasible][slow]") {
     // The full answer set is provably worst-case-5 (and 4 is impossible). Proving
     // 4-infeasibility over the whole set is expensive, so we check the headline
     // direction (feasible at 5) on the real set, which is fast with memoization.
@@ -330,7 +252,7 @@ TEST_CASE("is_feasible - answer set is solvable in 5 but not 4 (sampled)",
 }
 
 TEST_CASE("best_guess_feasible - returns a feasible, splitting guess",
-          "[solver][optimal][slow]") {
+          "[solver][feasible][slow]") {
     auto wl = WordList::load("data/words.txt");
     REQUIRE(wl.has_value());
     auto ans = WordList::load("data/answers.txt");
