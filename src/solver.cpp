@@ -215,7 +215,15 @@ bool EntropySolver::is_feasible(std::span<const uint16_t> candidates, int depth,
     }
     ++stats_.feasible_recur;
 
-    // Order guesses by max-bucket ascending (best splitters first → prune hard).
+    // Rank guesses by max-bucket ascending (best splitters first → prune hard).
+    // We try guesses in this order and break on the first feasible one, so a
+    // FULL sort of all ~15k splitters is wasteful — the answer is almost always
+    // among the strongest few. partial_sort brings the best `kPartial` to the
+    // front (cheap); only if those are exhausted without success do we sort the
+    // remainder (rare), keeping the search exhaustive and exact.
+    //
+    // When depth-1 == 1 (depth==2) only mb==1 guesses can work, so the search
+    // stops at the first mb>1; the bounded prefix already covers that.
     const std::size_t W = words_.size();
     std::vector<std::pair<int, uint16_t>> order;
     order.reserve(W);
@@ -227,14 +235,25 @@ bool EntropySolver::is_feasible(std::span<const uint16_t> candidates, int depth,
         if (mb == n) continue;  // no progress
         order.emplace_back(mb, gi);
     }
-    std::ranges::sort(order, [](auto& a, auto& b){
+    constexpr auto by_rank = [](const std::pair<int,uint16_t>& a,
+                                const std::pair<int,uint16_t>& b){
         if (a.first != b.first) return a.first < b.first;
         return a.second < b.second;
-    });
+    };
+    constexpr std::size_t kPartial = 64;
+    std::size_t sorted_upto = std::min(kPartial, order.size());
+    std::ranges::partial_sort(order, order.begin() + static_cast<std::ptrdiff_t>(sorted_upto),
+                              by_rank);
 
     bool ok = false;
     uint16_t chosen = WordList::NPOS;
-    for (auto& [mb, gi] : order) {
+    for (std::size_t i = 0; i < order.size(); ++i) {
+        if (i == sorted_upto) {  // exhausted the partially-sorted prefix
+            std::ranges::sort(order.begin() + static_cast<std::ptrdiff_t>(sorted_upto),
+                              order.end(), by_rank);
+            sorted_upto = order.size();
+        }
+        auto [mb, gi] = order[i];
         if (depth - 1 == 1 && mb > 1) break;  // remaining can't solve in 1 guess
         ++stats_.partitions;
         auto buckets = partition(candidates, gi, patterns_);
