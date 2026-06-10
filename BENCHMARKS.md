@@ -38,6 +38,7 @@ Default invocation unless noted: `./build/build_db --output wordle.db`
 | 2026-06-10 | 37.68  | 35.28   | 1.77   | 1.42    | 74.7%    | 3.4870 | partial_sort guess ranking (was full sort) |
 | 2026-06-10 | 30.52  | 28.91   | 0.98   | 1.73    | 74.6%    | 3.4870 | reusable sparse-reset histograms; single-pass score_guess |
 | 2026-06-10 | 29.38  | 27.79   | 0.99   | 1.80    | 82.2%    | 3.4870 | check feasibility buckets largest-first (fail-fast) |
+| 2026-06-11 | 21.37  | 18.52   | 0.96   | 2.70    | —        | 3.4870 | **`--gpu`**: Metal-batched bucket ranking (branch gpu-frontier-feasibility) |
 
 **Cumulative: 55.4s → 29.4s (−47%)**, mean unchanged (worst-5 / 3.4870). The
 sweep is still ~95% of wall time; the floor is now `partition()` (≈707K calls)
@@ -63,14 +64,20 @@ Findings from instrumentation + benchmarks:
   **once** and reused across many dispatches. One-shot uses (e.g. the single
   opener pre-ranking, ~50 ms on CPU) are net-negative (upload+transpose ≈100 ms).
 
-**Integration path (the real win, not yet landed):** restructure feasibility
-from depth-first one-set-at-a-time into a **level-synchronous frontier**: a node's
-non-empty buckets are a natural batch of sibling sets at the next depth, so
-`score_sets` ranks them in one dispatch over a GPU-resident matrix shared for the
-whole sweep. This must reproduce the exact CPU semantics (max-bucket order,
-break-on-first-feasible, largest-bucket-first) — so it lands as an opt-in,
-parity-validated path before becoming default. `score_sets` is built and proven;
-the frontier restructuring is the remaining work.
+**Integration (landed on branch `gpu-frontier-feasibility`, opt-in `--gpu`):**
+in `is_feasible`, before recursing on a chosen guess's sibling buckets, batch-rank
+all the multi-element buckets in one `score_sets` dispatch over a GPU-resident
+matrix uploaded once and shared read-only across all sweep workers. The recursion
+then consumes the cached rankings instead of CPU-scanning ~15k guesses per
+bucket. Verified **byte-for-byte identical** trees (standard + full-coverage),
+deterministic across runs. Result: wall **31.2s → 21.4s (−32%)**, sweep
+29.3s → 18.5s.
+
+Why not the full 45-60× the kernel shows: only the *ranking* is offloaded; the
+recursion control flow, `partition`, and the GPU-result unpack stay on CPU, and
+per-node batches are small (a node's few buckets) so dispatch latency isn't fully
+amortised. Further gains would come from coarser batching (whole-level frontiers)
+and GPU-accelerating `best_guess_feasible`'s entropy ranking too.
 
 ### Raw WPMETRICS datapoints
 

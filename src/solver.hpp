@@ -14,6 +14,9 @@
 
 namespace wp {
 
+class GpuScorer;  // optional Metal accelerator (src/gpu_score.hpp); fwd-declared
+                  // so core doesn't depend on Metal headers.
+
 // ---------------------------------------------------------------------------
 // FeasibilityCache — thread-safe, sharded memo of is_feasible() results.
 //
@@ -138,6 +141,12 @@ public:
         shared_feas_ = cache;
     }
 
+    // Optional GPU scorer (matrix uploaded once, reused). When set, is_feasible
+    // batches each tree node's sibling-bucket rankings into a single GPU
+    // score_sets dispatch instead of CPU-scanning all ~15k guesses per bucket.
+    // Result is identical to the CPU path (same ranking → same selection).
+    void set_gpu_scorer(const GpuScorer* gpu) noexcept { gpu_ = gpu; }
+
     // Partition `candidates` by their pattern against `guess_idx`.
     [[nodiscard]] static std::array<std::vector<WordIndex>, PATTERN_COUNT>
     partition(std::span<const WordIndex> candidates,
@@ -235,6 +244,17 @@ private:
     // Optional cross-instance feasibility cache (set via set_feasibility_cache);
     // when non-null it supersedes feas_memo_/feas_witness_ for is_feasible().
     FeasibilityCache* shared_feas_{nullptr};
+    const GpuScorer*  gpu_{nullptr};  // optional Metal scorer for batched ranking
+    // When the GPU path is active, a node's guess ranking (the (max_bucket, gi)
+    // list, sorted) is precomputed for a whole batch of sibling buckets in one
+    // dispatch and stashed here keyed by the set hash, so the recursive
+    // is_feasible() consumes it instead of CPU-scanning ~15k guesses per node.
+    mutable std::unordered_map<std::uint64_t, std::vector<std::pair<int, WordIndex>>> rank_cache_;
+    // Build (or fetch) the max-bucket-ordered guess ranking for `candidates`.
+    void build_ranking(std::span<const WordIndex> candidates, int n,
+                       std::vector<std::pair<int, WordIndex>>& out) const;
+    // GPU-batch the rankings for many sets at once into rank_cache_.
+    void prime_rankings_gpu(const std::vector<std::span<const WordIndex>>& sets) const;
     mutable Stats stats_;
     // Total depth (sum over candidates, direct hit = 1) under the entropy-greedy
     // feasible policy; used by best_guess_feasible's lookahead tie-break.

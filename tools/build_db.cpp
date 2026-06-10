@@ -33,6 +33,9 @@
 #include "database.hpp"
 #include "binarydb.hpp"
 #include "progress.hpp"
+#ifdef WP_HAVE_METAL
+#include "gpu_score.hpp"
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -137,9 +140,34 @@ BuildResult build_tree(const WordList& wl, const PatternMatrix& pm,
                        Database& db, const std::vector<WordIndex>& cand,
                        int worst_cap, std::size_t sweep_lookahead,
                        std::size_t emit_lookahead, std::size_t top,
-                       WordIndex forced_root, unsigned nthreads) {
+                       WordIndex forced_root, unsigned nthreads, bool use_gpu) {
     const int n = static_cast<int>(cand.size());
     BuildResult result;
+
+#ifdef WP_HAVE_METAL
+    // Optional GPU scorer: the N×N matrix is uploaded ONCE here and shared
+    // (read-only) across all sweep workers, so the per-node bucket-ranking
+    // batches amortise against a single upload.
+    std::optional<GpuScorer> gpu;
+    if (use_gpu) {
+        static std::vector<Pattern> flat;
+        if (flat.empty()) {
+            flat.resize(static_cast<std::size_t>(wl.size()) * wl.size());
+            for (std::size_t g = 0; g < wl.size(); ++g)
+                for (std::size_t a = 0; a < wl.size(); ++a)
+                    flat[g * wl.size() + a] =
+                        pm.get(static_cast<WordIndex>(g), static_cast<WordIndex>(a));
+        }
+        if (auto s = GpuScorer::create(flat.data(), static_cast<std::uint32_t>(wl.size())))
+            gpu.emplace(std::move(*s));
+        else
+            std::println(stderr, "  (GPU unavailable: {} — using CPU)", s.error());
+    }
+    const GpuScorer* gpu_ptr = gpu ? &*gpu : nullptr;
+#else
+    (void)use_gpu;
+    const GpuScorer* gpu_ptr = nullptr;
+#endif
 
     WordIndex opener = forced_root;
     if (opener == WordList::NPOS) {
@@ -177,6 +205,7 @@ BuildResult build_tree(const WordList& wl, const PatternMatrix& pm,
         auto worker = [&]() {
             EntropySolver solver{wl, pm};
             solver.set_feasibility_cache(&feas_cache);
+            solver.set_gpu_scorer(gpu_ptr);
             for (;;) {
                 std::size_t i = next.fetch_add(1, std::memory_order_relaxed);
                 if (i >= openers.size()) break;
@@ -212,6 +241,7 @@ BuildResult build_tree(const WordList& wl, const PatternMatrix& pm,
 
     // ── Emit the chosen opener's tree (emit_lookahead applied here only) ──────
     EntropySolver solver{wl, pm};
+    solver.set_gpu_scorer(gpu_ptr);
     if (auto r = db.begin_transaction(); !r) die(r.error());
     Progress prog{"  building tree", std::uint64_t{0}, "nodes"};
     const auto emit_t0 = Clock::now();
@@ -319,6 +349,7 @@ int main(int argc, char** argv) {
     // ── Modifiers / flags ────────────────────────────────────────────────────
     const bool full_mode = has_flag("--full");
     const bool no_binary = has_flag("--no-binary");
+    const bool use_gpu   = has_flag("--gpu");   // Metal-batched bucket ranking
 
     std::string start_word;
     std::string words_date_override;
@@ -426,7 +457,7 @@ int main(int argc, char** argv) {
         target_depth, emit_lookahead, nthreads);
     auto res = build_tree(*wl, pm, *db, answer_indices, target_depth,
                           sweep_lookahead, emit_lookahead, top,
-                          fixed_root, nthreads);
+                          fixed_root, nthreads, use_gpu);
     const std::uint64_t nodes_written = res.nodes;
     const double build_s = elapsed_s(t0);
     // Label records *what was done*, not a quality claim: "minimax" = worst-case

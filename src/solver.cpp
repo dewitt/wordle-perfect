@@ -1,4 +1,7 @@
 #include "solver.hpp"
+#ifdef WP_HAVE_METAL
+#include "gpu_score.hpp"
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -223,6 +226,75 @@ struct GuessScore { int max_bucket; double entropy; };
 }
 }  // namespace
 
+// Build the max-bucket-ordered guess ranking for `candidates`. Uses a cached
+// ranking if the GPU path pre-primed one for this set; otherwise CPU-scans all
+// guesses. The result is the (max_bucket, gi) list of progress-making guesses
+// (max_bucket < n), unsorted — the caller sorts/partial_sorts.
+void EntropySolver::build_ranking(std::span<const WordIndex> candidates, int n,
+                                  std::vector<std::pair<int, WordIndex>>& out) const {
+    out.clear();
+    if (gpu_) {
+        const std::uint64_t rk = feas_hash(candidates, /*depth tag=*/0);
+        if (auto it = rank_cache_.find(rk); it != rank_cache_.end()) {
+            out = it->second;          // GPU-primed ranking — no CPU scan
+            return;
+        }
+    }
+    const std::size_t W = words_.size();
+    out.reserve(W);
+    for (std::size_t g = 0; g < W; ++g) {
+        const auto gi = static_cast<WordIndex>(g);
+        const int mb = max_bucket_size(patterns_, candidates, gi);
+        if (mb == n) continue;
+        out.emplace_back(mb, gi);
+    }
+}
+
+#ifdef WP_HAVE_METAL
+// GPU-score a batch of sets in one dispatch; stash each set's progress-making
+// guess ranking in rank_cache_ keyed by set hash. This replaces N separate
+// 15k-guess CPU scans (one per sibling bucket) with a single GPU pass.
+void EntropySolver::prime_rankings_gpu(
+        const std::vector<std::span<const WordIndex>>& sets) const {
+    if (!gpu_ || sets.empty()) return;
+
+    // Pack only sets not already cached.
+    std::vector<WordIndex> packed;
+    std::vector<std::uint32_t> offsets{0};
+    std::vector<std::uint64_t> keys;
+    std::vector<int> sizes;
+    for (auto s : sets) {
+        const std::uint64_t rk = feas_hash(s, 0);
+        if (rank_cache_.contains(rk)) continue;
+        for (WordIndex c : s) packed.push_back(c);
+        offsets.push_back(static_cast<std::uint32_t>(packed.size()));
+        keys.push_back(rk);
+        sizes.push_back(static_cast<int>(s.size()));
+    }
+    if (keys.empty()) return;
+
+    auto scored = gpu_->score_sets(packed, offsets);
+    if (!scored) return;  // on any GPU error, callers fall back to CPU scan
+
+    const std::size_t W = words_.size();
+    for (std::size_t si = 0; si < keys.size(); ++si) {
+        const auto* row = scored->data() + si * W;
+        const int n = sizes[si];
+        std::vector<std::pair<int, WordIndex>> order;
+        order.reserve(256);
+        for (std::size_t g = 0; g < W; ++g) {
+            const int mb = static_cast<int>(row[g].max_bucket);
+            if (mb == n) continue;
+            order.emplace_back(mb, static_cast<WordIndex>(g));
+        }
+        rank_cache_.emplace(keys[si], std::move(order));
+    }
+}
+#else
+void EntropySolver::prime_rankings_gpu(
+        const std::vector<std::span<const WordIndex>>&) const {}
+#endif
+
 bool EntropySolver::is_feasible(std::span<const WordIndex> candidates, int depth,
                                 WordIndex* witness) const {
     ++stats_.feasible_calls;
@@ -263,15 +335,8 @@ bool EntropySolver::is_feasible(std::span<const WordIndex> candidates, int depth
     //
     // When depth-1 == 1 (depth==2) only mb==1 guesses can work, so the search
     // stops at the first mb>1; the bounded prefix already covers that.
-    const std::size_t W = words_.size();
     std::vector<std::pair<int, WordIndex>> order;
-    order.reserve(W);
-    for (std::size_t g = 0; g < W; ++g) {
-        const auto gi = static_cast<WordIndex>(g);
-        const int mb = max_bucket_size(patterns_, candidates, gi);
-        if (mb == n) continue;  // no progress
-        order.emplace_back(mb, gi);
-    }
+    build_ranking(candidates, n, order);  // GPU-primed if available, else CPU scan
     constexpr auto by_rank = [](const std::pair<int,WordIndex>& a,
                                 const std::pair<int,WordIndex>& b){
         if (a.first != b.first) return a.first < b.first;
@@ -303,6 +368,17 @@ bool EntropySolver::is_feasible(std::span<const WordIndex> candidates, int depth
             if (!buckets[p].empty()) nonempty[nb++] = p;
         std::sort(nonempty.begin(), nonempty.begin() + nb,
                   [&](Pattern a, Pattern b){ return buckets[a].size() > buckets[b].size(); });
+        // GPU path: rank all the multi-element sibling buckets that will need a
+        // ranking in one batched dispatch, so the recursion below consumes
+        // cached rankings instead of re-scanning ~15k guesses per bucket.
+        if (gpu_ && depth - 1 > 1) {
+            std::vector<std::span<const WordIndex>> batch;
+            for (int bi = 0; bi < nb; ++bi) {
+                auto& b = buckets[nonempty[bi]];
+                if (b.size() > 1) batch.emplace_back(b);
+            }
+            prime_rankings_gpu(batch);
+        }
         bool all_ok = true;
         for (int bi = 0; bi < nb && all_ok; ++bi) {
             if (!is_feasible(buckets[nonempty[bi]], depth - 1, nullptr)) all_ok = false;
