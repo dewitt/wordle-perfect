@@ -196,6 +196,29 @@ public:
                           WordIndex opener, int budget,
                           std::size_t lookahead = 1) const;
 
+    // ── Exact mean optimisation: minimal total depth subject to worst<=depth ──
+    //
+    // min_total(S, depth) = the MINIMUM achievable Σ-over-answers-in-S of their
+    // solve depth (counted from this node; a direct hit = 1), over all decision
+    // trees whose worst-case depth is <= `depth`. Returns MIN_TOTAL_INFEASIBLE
+    // if S cannot be solved within `depth`. This is the provably-optimal mean
+    // (not the entropy heuristic), found by branch-and-bound:
+    //   (a) worst-case cap `depth` bounds the search (we already prove D*=5);
+    //   (b) alpha-beta on the running total — abandon a guess once its partial
+    //       sum reaches the incumbent / passed-in `bound`;
+    //   (c) TRANSPOSITION: memoised on the sorted candidate set (the value is
+    //       independent of the guess order that produced S), keyed exactly.
+    // The optimal first guess for S is recorded in the transposition table and
+    // retrievable via optimal_guess().
+    static constexpr int MIN_TOTAL_INFEASIBLE = std::numeric_limits<int>::max();
+    [[nodiscard]] int min_total(std::span<const WordIndex> candidates,
+                                int depth,
+                                int bound = MIN_TOTAL_INFEASIBLE) const;
+    // After min_total has solved `candidates` at `depth`, the optimal first guess
+    // (or NPOS). For tree emission.
+    [[nodiscard]] WordIndex optimal_guess(std::span<const WordIndex> candidates,
+                                          int depth) const;
+
     // Solve for a known target word, returning the full step sequence.
     // answer_idx must be a valid index into the WordList.
     // max_rounds caps the search; defaults to DEFAULT_MAX_ROUNDS (6).
@@ -241,6 +264,11 @@ private:
     // so the production build (which calls it once per node) doesn't recompute
     // the full-vocabulary entropy ranking for recurring candidate sets.
     mutable std::unordered_map<std::uint64_t, WordIndex> feas_choice_;
+    // Transposition table for the exact min_total DP: key = hash(sorted set,
+    // depth) → {optimal total depth, optimal first guess}. Stores EXACT values
+    // (computed with no external bound), so entries are reusable and sound.
+    struct TotEntry { int total; WordIndex guess; };
+    mutable std::unordered_map<std::uint64_t, TotEntry> tot_memo_;
     // Optional cross-instance feasibility cache (set via set_feasibility_cache);
     // when non-null it supersedes feas_memo_/feas_witness_ for is_feasible().
     FeasibilityCache* shared_feas_{nullptr};

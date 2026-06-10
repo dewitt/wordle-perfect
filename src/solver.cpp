@@ -454,6 +454,108 @@ int EntropySolver::tree_total_for_opener(std::span<const WordIndex> candidates,
     return total;
 }
 
+// ── Exact mean optimisation: min_total / optimal_guess ──────────────────────
+//
+// min_total(S, depth): minimal Σ-depth (direct hit = 1) over trees with
+// worst-case <= depth. Branch-and-bound with transposition (sorted-set memo).
+int EntropySolver::min_total(std::span<const WordIndex> candidates, int depth,
+                             int bound) const {
+    const int n = static_cast<int>(candidates.size());
+    if (n == 0) return 0;
+    if (n == 1) return 1;                       // solved by guessing it
+    if (depth <= 1) return MIN_TOTAL_INFEASIBLE; // 2+ words need >=2 guesses
+    // Admissible: depth-2 can split into at most 243 singleton buckets.
+    if (depth == 2 && n > PATTERN_COUNT) return MIN_TOTAL_INFEASIBLE;
+
+    // (c) Transposition: exact value of S at `depth` is order-independent.
+    const std::uint64_t key = feas_hash(candidates, depth) ^ 0x6D7E'A11Cull;
+    if (auto it = tot_memo_.find(key); it != tot_memo_.end()) return it->second.total;
+
+    // Admissible lower bound on ANY tree's total for S: every word costs >=1
+    // (the guess here), and at most one word per non-solved bucket can be a
+    // depth-1 hit, the rest cost >=2 — but cheaply, n + (n-1) is a valid floor
+    // (>=1 word needs a 2nd guess). If even that can't beat `bound`, give up.
+    if (n + (n - 1) >= bound) return MIN_TOTAL_INFEASIBLE;
+
+    // Order guesses by max-bucket ascending: good splitters first tighten the
+    // incumbent fastest (more αβ pruning) and tend to be the optimal choice.
+    std::vector<std::pair<int, WordIndex>> order;
+    {
+        const std::size_t W = words_.size();
+        order.reserve(W);
+        for (std::size_t g = 0; g < W; ++g) {
+            const auto gi = static_cast<WordIndex>(g);
+            const int mb = max_bucket_size(patterns_, candidates, gi);
+            if (mb == n) continue;             // no progress
+            order.emplace_back(mb, gi);
+        }
+        std::ranges::sort(order, [](auto& a, auto& b){
+            if (a.first != b.first) return a.first < b.first;
+            return a.second < b.second;
+        });
+    }
+
+    // (b) Seed the incumbent with a quick greedy-feasible upper bound so alpha-
+    // beta prunes from the very first guess. feasible_total follows the entropy
+    // policy (no branching) and is cheap; its total is a valid upper bound on the
+    // optimum, so starting `best` there is sound and dramatically tightens αβ.
+    // best_gi tracks the guess achieving `best`; seed it with the greedy guess
+    // so that, if no guess strictly improves on the UB, we still return the UB
+    // (which is achievable) rather than INFEASIBLE.
+    int best = bound;
+    WordIndex best_gi = WordList::NPOS;
+    {
+        WordIndex gg = best_guess_feasible(candidates, depth, /*lookahead=*/1);
+        if (gg != WordList::NPOS) {
+            const int ub = feasible_total(candidates, depth);
+            if (ub < best) { best = ub; best_gi = gg; }
+        }
+    }
+    for (auto& [mb, gi] : order) {
+        // A guess's own admissible floor: n (everyone pays for this guess) +
+        // (n - #buckets) ... cheaply: a guess whose largest bucket can't be
+        // solved in depth-1 is still allowed, recursion handles it. Floor by
+        // partition shape: total >= n + Σ_buckets(|b|>1)(|b|).  Compute lazily.
+        auto buckets = partition(candidates, gi, patterns_);
+        int total = n;
+        bool feasible = true;
+        // Recurse into non-solved buckets; children computed EXACTLY (bound=
+        // INFEASIBLE) so their memo entries stay sound. αβ via `best` cutoff.
+        for (Pattern p = 0; p < PATTERN_COUNT && feasible; ++p) {
+            if (p == PATTERN_SOLVED) continue;
+            auto& b = buckets[p];
+            if (b.empty()) continue;
+            int sub;
+            if (b.size() == 1) sub = 1;
+            else {
+                sub = min_total(b, depth - 1, MIN_TOTAL_INFEASIBLE);
+                if (sub >= MIN_TOTAL_INFEASIBLE) { feasible = false; break; }
+            }
+            total += sub;
+            if (total >= best) { feasible = false; break; }  // αβ: can't beat
+        }
+        if (feasible && total < best) { best = total; best_gi = gi; }
+    }
+
+    const int result = (best_gi == WordList::NPOS) ? MIN_TOTAL_INFEASIBLE : best;
+    // Only cache EXACT results: if we were called with an external bound that
+    // pruned everything, `best` may be that bound (not the true minimum), so we
+    // must not memoise an infeasible/poisoned value. When bound==INFEASIBLE the
+    // search was unbounded and the result is exact.
+    if (bound >= MIN_TOTAL_INFEASIBLE)
+        tot_memo_[key] = {result, best_gi};
+    return result;
+}
+
+WordIndex EntropySolver::optimal_guess(std::span<const WordIndex> candidates,
+                                       int depth) const {
+    const int n = static_cast<int>(candidates.size());
+    if (n == 1) return candidates[0];
+    const std::uint64_t key = feas_hash(candidates, depth) ^ 0x6D7E'A11Cull;
+    if (auto it = tot_memo_.find(key); it != tot_memo_.end()) return it->second.guess;
+    return WordList::NPOS;
+}
+
 WordIndex EntropySolver::best_guess_feasible(std::span<const WordIndex> candidates,
                                              int budget,
                                              std::size_t lookahead) const {

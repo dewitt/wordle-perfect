@@ -71,6 +71,10 @@ target_link_libraries(wordle PRIVATE wordle_core)
 add_executable(build_db tools/build_db.cpp)
 target_link_libraries(build_db PRIVATE wordle_core)
 
+# ── Exact minimal-mean optimiser (branch-and-bound DP) ────────────────────────
+add_executable(exact_mean tools/exact_mean.cpp)
+target_link_libraries(exact_mean PRIVATE wordle_core)
+
 # ── GPU node-scoring benchmark (Metal; issue #12) ─────────────────────────────
 add_executable(gpu_bench tools/gpu_bench.cpp)
 target_link_libraries(gpu_bench PRIVATE wordle_core)
