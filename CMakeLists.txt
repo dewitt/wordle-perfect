@@ -67,17 +67,9 @@ endif()
 add_executable(wordle src/main.cpp)
 target_link_libraries(wordle PRIVATE wordle_core)
 
-# ── Precomputation tool ───────────────────────────────────────────────────────
+# ── Precomputation tool (the single decision-tree builder) ────────────────────
 add_executable(build_db tools/build_db.cpp)
 target_link_libraries(build_db PRIVATE wordle_core)
-
-# ── Experimental optimal-tree search (issue #8 research) ──────────────────────
-add_executable(optimal tools/optimal.cpp)
-target_link_libraries(optimal PRIVATE wordle_core)
-
-# ── Parallel exact optimal solver (issue #27) ─────────────────────────────────
-add_executable(exact tools/exact.cpp)
-target_link_libraries(exact PRIVATE wordle_core)
 
 # ── GPU node-scoring benchmark (Metal; issue #12) ─────────────────────────────
 add_executable(gpu_bench tools/gpu_bench.cpp)
