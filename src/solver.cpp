@@ -294,11 +294,18 @@ bool EntropySolver::is_feasible(std::span<const uint16_t> candidates, int depth,
         if (depth - 1 == 1 && mb > 1) break;  // remaining can't solve in 1 guess
         ++stats_.partitions;
         auto buckets = partition(candidates, gi, patterns_);
+        // Check buckets largest-first: the biggest bucket is the hardest to
+        // solve in depth-1, so it's the most likely to be infeasible — failing
+        // on it first rejects a bad guess after one recursion instead of many.
+        std::array<Pattern, PATTERN_COUNT> nonempty;
+        int nb = 0;
+        for (Pattern p = 0; p < PATTERN_COUNT - 1; ++p)   // skip GGGGG (242)
+            if (!buckets[p].empty()) nonempty[nb++] = p;
+        std::sort(nonempty.begin(), nonempty.begin() + nb,
+                  [&](Pattern a, Pattern b){ return buckets[a].size() > buckets[b].size(); });
         bool all_ok = true;
-        for (Pattern p = 0; p < PATTERN_COUNT && all_ok; ++p) {
-            if (p == PATTERN_SOLVED) continue;
-            if (buckets[p].empty()) continue;
-            if (!is_feasible(buckets[p], depth - 1, nullptr)) all_ok = false;
+        for (int bi = 0; bi < nb && all_ok; ++bi) {
+            if (!is_feasible(buckets[nonempty[bi]], depth - 1, nullptr)) all_ok = false;
         }
         if (all_ok) { ok = true; chosen = gi; break; }
     }
