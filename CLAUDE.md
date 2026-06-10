@@ -28,10 +28,9 @@ A Wordle solver that precomputes the best-known decision tree over all valid Wor
 - [x] Minimax optimizer — alpha-beta for small candidate sets (≤64); seeded by greedy for pruning
 - [x] Beam re-search — top-N entropy probe for large candidate sets where minimax is intractable (`best_guess_beam`)
 - [x] Budget-aware escalation — `best_guess_within_budget`: greedy unless it blows the depth budget, then minimax (small) or beam (large)
-- [x] **Optimal worst-case-5 tree (issue #8)** — `tools/optimal.cpp` + `EntropySolver::is_feasible`/`best_guess_feasible`: DFS minimax (memoized on the candidate set) proves the answer set is solvable in worst-case 5 (the proven optimum); feasibility-constrained entropy-greedy + `--lookahead` minimises mean. `optimal --emit` writes a verified worst-5 DB. trace/lookahead-30 → worst 5, mean 3.5495.
-- [x] **Parallel exact opener sweep (issue #27)** — `tools/exact.cpp`: thread-pool fan-out over openers (per-thread `EntropySolver`, atomic work-stealing). 3–5× multi-core speedup; `--emit` writes the best opener's tree, CLI-verified worst-5 / mean **3.4938** (reast/tarse, better than the optimal tool's 3.5495).
-- [x] **Metal GPU node-scoring (issue #12)** — `src/gpu_score.{hpp,mm}`: a compute shader scores all ~15k guesses (max_bucket + entropy) in one dispatch. Transposed-matrix (coalesced) layout → **14.8×** vs CPU (15.7× on the full list), verified identical. `tools/gpu_bench` benchmarks/verifies. Gated by `WP_HAVE_METAL`; non-Apple builds unaffected.
-- [x] Precomputation pipeline — `build_db` tool (legacy entropy/beam, worst 6); `optimal` tool (worst-5 optimal). SQLite decision tree (~1–2 min)
+ - [x] **Optimal worst-case-5 tree (issues #8, #27)** — `EntropySolver::is_feasible`/`best_guess_feasible`: DFS minimax (memoized on the candidate set) proves the answer set is solvable in worst-case 5 (the proven optimum); feasibility-constrained entropy-greedy + `--lookahead` minimises mean. Now the **default** `build_db` strategy, with a **parallel opener sweep** (per-thread `EntropySolver`, atomic work-stealing, 3–5× multi-core) that picks the lowest-mean opener → reast, worst-5, **mean 3.4870**, verified by the built-in evaluate().
+ - [x] **Metal GPU node-scoring (issue #12)** — `src/gpu_score.{hpp,mm}`: a compute shader scores all ~15k guesses (max_bucket + entropy) in one dispatch. Transposed-matrix (coalesced) layout → **14.8×** vs CPU (15.7× on the full list), verified identical. `tools/gpu_bench` benchmarks/verifies. Gated by `WP_HAVE_METAL`; non-Apple builds unaffected.
+ - [x] Single precomputation tool — `build_db` with `--strategy optimal` (default, worst-5 parallel sweep) | `legacy` (entropy/beam, worst-6); `--full` for full coverage. SQLite + binary, verified by evaluate().
 - [x] CLI tool — `wordle` binary; `solve`, `play`, `eval`, `info`, `dump` modes
 - [x] Database integrity — FNV-1a checksum on every open
 - [x] Binary DB format — flat mmap'd `.bin` (`src/binarydb.*`) for true O(1) lookup; `build_db` exports it alongside the SQLite file; CLI auto-detects format. ~42% smaller, ~2× faster, no runtime SQLite dep
@@ -40,17 +39,16 @@ A Wordle solver that precomputes the best-known decision tree over all valid Wor
 - [x] Code quality — `DEPTH_IMPOSSIBLE` constant, cached DB statements, uint16_t overflow guard, shared `walk_target`, mtime-derived words_date, mode_solve answers validation, FNV hash correctness
 - [x] Full-coverage build mode — `build_db --full` builds `wordle-full.db` covering all 14,855 guess words (worst-case depth 8, 0 failures)
 
-**OPTIMAL database results (optimal-worst5-lookahead30, start word: trace):**
+**OPTIMAL database results (default `build_db`, start word: reast):**
 - Worst case: **5 guesses** — the proven optimum for the curated answer set (4 is impossible). All 2,355 answers solved, 0 failures.
-- Mean depth: **3.5495 guesses**
-- Distribution: 1×1, 38×2, 1056×3, 1186×4, 74×5 (zero 6+)
-- 2,778 nodes; built by `optimal --mode tree --start trace --max-depth 5 --lookahead 30 --emit` in ~1.5 min
-- Verified independently by the production CLI `eval` (and SQLite==binary parity)
-- Build the optimal tree with the `optimal` tool, NOT `build_db` (whose entropy/beam path tops out at worst 6).
+- Mean depth: **3.4870 guesses** (lookahead 1, parallel opener sweep picks reast)
+- Distribution: 41×2, 1176×3, 1072×4, 66×5 (zero 6+)
+- Built by `build_db --output wordle.db` (parallel sweep) in ~1 min on 8 cores; `--lookahead K` lowers the mean further (slower); `--start-word W` skips the sweep
+- worst/mean are measured by the built-in `evaluate()` (SQLite==binary parity)
 
-**Legacy database results (answer-weighted-beam-v3, start word: tarse):**
+**Legacy database results (`--strategy legacy`, start word: tarse):**
 - Worst case 6, mean 3.8144; distribution 0×1, 11×2, 672×3, 1420×4, 247×5, 5×6; 16,521 nodes
-- Still produced by `build_db`; superseded by the optimal worst-5 tree above.
+- Kept for comparison; superseded by the optimal worst-5 default above.
 - Answers source: cfreshman/a03ef2cba789d8cf00c08f767e0fad7b (original embed) + 40 post-acquisition NYT additions from eithan/wordlelist
 
 **Hillclimbing findings:**
@@ -60,12 +58,13 @@ A Wordle solver that precomputes the best-known decision tree over all valid Wor
 - The budget-aware beam re-search (depth ≥ 2, width 24) reduced the depth-6 residue from 6 words to 5 and improved mean 3.8170 → 3.8144. The remaining 5 (boxer, bunny, fuzzy, joker, rover) are **not** claimed globally unavoidable — only that greedy+beam from tarse finds no shorter path within practical compute. A worst-case-5 answer-set tree is known to exist under exhaustive minimax (future work, issue #8).
 - Escalating at depth 2 is the dominant build cost (≈2× build time) but is required for the 6→5 improvement; `--min-escalation-depth 3` reverts to the faster 6-word result. Wider beams (48) gave no further gain.
 - Forced strong openers under greedy+beam did NOT beat tarse for worst-case (e.g. salet/target-depth-5 → 9×6); reaching worst=5 needs true depth-first minimax, not greedy.
-- Full-coverage DB — two options:
-  - **Optimal worst-7** (`optimal --mode tree --answers data/words.txt --max-depth 7 --emit`): worst-case **7** (down from 8), mean 4.2732, 0 failures; distribution 1×1, 41×2, 1679×3, 8003×4, 4490×5, 590×6, 51×7 (zero 8s). Start `tares`, ~40s build, 18,701 nodes. By the project's worst-case-first priority this supersedes the entropy/beam full tree. Verified via the production CLI eval over all 14,855 words. Lookahead is impractically slow on the 14,855-candidate set, so mean is left at the lookahead-1 value (slightly above the entropy tree's 4.1280 — the cost of forcing worst≤7).
-  - **Legacy entropy/beam** (`build_db --full`): worst-case 8, mean 4.1280, 16,543 nodes; lower mean but a deeper worst case.
+- Full-coverage DB (`build_db --full`) — two strategies:
+  - **Optimal worst-7** (default): worst-case **7** (down from 8), mean ≈4.17, 0 failures; zero 8-guess words. Forced `--start-word tares` skips the (slow) full-list sweep. Verified via the built-in evaluate over all 14,855 words.
+  - **Legacy** (`--strategy legacy --full`): worst-case 8, mean 4.1280; lower mean but a deeper worst case.
 
 **Architecture summary:**
-- Guess selection is driven by `EntropySolver::best_guess_within_budget`: take the greedy entropy guess, but if its greedy worst-case continuation would exceed the remaining depth budget, escalate.
+- **Default `optimal` strategy**: `build_optimal` runs a parallel opener sweep — each worker thread (own `EntropySolver`, private feasibility memo, atomic work-stealing) evaluates an opener via `tree_total_for_opener`; the lowest-mean feasible opener wins, then the tree is emitted node-by-node via `best_guess_feasible` (warm memo). `--start-word` skips the sweep; `--top` caps it; `--lookahead` lowers the mean.
+- **Legacy strategy** is driven by `EntropySolver::best_guess_within_budget`: take the greedy entropy guess, but if its greedy worst-case continuation would exceed the remaining depth budget, escalate.
 - Escalation: candidate sets ≤ `ESCALATE_MAX_CANDIDATES` (64) use full alpha-beta `minimax_best_guess`; larger sets use `best_guess_beam` (probe the top-`beam_width` entropy guesses with a pruned `greedy_worst_depth`).
 - Minimax/greedy probes are seeded/pruned by `greedy_worst_depth()` (now with an `upper_bound` alpha cutoff); sub-calls restrict to the candidate pool (O(K^depth) instead of O(N^depth)).
 - `DEPTH_IMPOSSIBLE = std::numeric_limits<int>::max()` is the named sentinel for "budget exceeded" or "no improvement".
@@ -98,9 +97,7 @@ See the open GitHub issues for the remaining backlog from the code review — no
 | `src/solver.hpp/cpp` | `EntropySolver`: weighted entropy, minimax, beam re-search, `best_guess_within_budget`, `is_feasible`/`best_guess_feasible` (optimal worst-5); `DEPTH_IMPOSSIBLE` sentinel |
 | `src/database.hpp/cpp` | SQLite decision tree + templated `walk_target` helper + bulk `all_nodes`/`all_edges` export (read/write, checksum, metadata, cached hot-path stmts) |
 | `src/binarydb.hpp/cpp` | Flat mmap'd `.bin` decision tree (`BinaryDb`): header+checksum, direct-indexed nodes, CSR pattern-sorted edges; `export_from(Database)` + read-only mmap lookup |
-| `tools/build_db.cpp` | Legacy precomputation pipeline (entropy/beam, worst 6); budget-aware escalation; exports SQLite + binary; flags incl. `--full`, `--target-depth`, `--min-escalation-depth`, `--beam-width`, `--date`, `--binary`, `--no-binary` |
-| `tools/optimal.cpp` | **Optimal worst-5 builder** — DFS minimax feasibility + entropy-greedy with `--lookahead`; `--mode tree --emit` writes a verified worst-5 DB (+ binary) |
-| `tools/exact.cpp` | **Parallel opener sweep** — thread-pool fan-out over openers (work-stealing); `--top`, `--jobs`, `--lookahead`, `--emit`. Best verified tree: worst-5, mean 3.4938 |
+| `tools/build_db.cpp` | **The single decision-tree builder.** `--strategy optimal` (default): parallel feasibility-constrained opener sweep → worst-5, mean 3.4870. `--strategy legacy`: entropy/beam, worst-6. `--full` for full coverage. Always runs evaluate() for measured metadata; exports SQLite + binary. Flags: `--start-word`, `--lookahead`, `--top`, `--jobs`, `--target-depth`, `--answer-weight`, `--beam-width`, `--min-escalation-depth`, `--date`, `--binary`, `--no-binary` |
 | `src/gpu_score.{hpp,mm}` | **Metal GPU scorer** — one-dispatch scoring of all guesses (max_bucket+entropy); transposed-matrix coalesced layout, 14.8× CPU |
 | `tools/gpu_bench.cpp` | GPU-vs-CPU scoring benchmark + parity check |
 | `src/main.cpp` | CLI entry point (`solve`, `play`, `eval`, `info`, `dump`); validates solve targets vs answers list |
