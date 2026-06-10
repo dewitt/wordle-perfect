@@ -7,11 +7,62 @@
 #include <cstdint>
 #include <functional>
 #include <limits>
+#include <mutex>
 #include <span>
 #include <unordered_map>
 #include <vector>
 
 namespace wp {
+
+// ---------------------------------------------------------------------------
+// FeasibilityCache — thread-safe, sharded memo of is_feasible() results.
+//
+// is_feasible(candidate-set, depth) is a PURE function (independent of the
+// opener or weights), so when many EntropySolver workers evaluate different
+// openers in parallel they recompute the same feasibility facts over heavily
+// overlapping subtrees. Sharing one cache across the workers eliminates that
+// duplication. Sharded by hash to keep lock contention low.
+//
+// Stores: status (1 feasible / 2 infeasible) packed with a witness guess.
+// ---------------------------------------------------------------------------
+class FeasibilityCache {
+public:
+    struct Entry { char status; uint16_t witness; };
+
+    // Returns the cached entry for `key`, or nullopt. Cheap shared-path lock.
+    [[nodiscard]] bool get(std::uint64_t key, Entry& out) const {
+        auto& sh = shard(key);
+        std::lock_guard lk{sh.m};
+        auto it = sh.map.find(key);
+        if (it == sh.map.end()) return false;
+        out = it->second;
+        return true;
+    }
+
+    void put(std::uint64_t key, Entry e) {
+        auto& sh = shard(key);
+        std::lock_guard lk{sh.m};
+        sh.map.emplace(key, e);   // first writer wins; entries are immutable facts
+    }
+
+    [[nodiscard]] std::size_t size() const {
+        std::size_t total = 0;
+        for (auto& sh : shards_) { std::lock_guard lk{sh.m}; total += sh.map.size(); }
+        return total;
+    }
+
+private:
+    static constexpr std::size_t SHARDS = 64;  // power of two
+    struct Shard {
+        mutable std::mutex m;
+        std::unordered_map<std::uint64_t, Entry> map;
+    };
+    std::array<Shard, SHARDS> shards_;
+    Shard& shard(std::uint64_t key) const {
+        // Mix high bits down; the low bits are used elsewhere too.
+        return const_cast<Shard&>(shards_[(key ^ (key >> 32)) & (SHARDS - 1)]);
+    }
+};
 
 // ---------------------------------------------------------------------------
 // PatternMatrix — precomputed N×N pattern table
@@ -79,6 +130,13 @@ public:
     explicit EntropySolver(const WordList& words, const PatternMatrix& patterns,
                            WeightFn weight_fn = {})
         : words_{words}, patterns_{patterns}, weight_fn_{std::move(weight_fn)} {}
+
+    // Share a feasibility cache across solver instances (e.g. parallel sweep
+    // workers). When set, is_feasible() reads/writes this cache instead of the
+    // per-instance memo, so workers reuse each other's (pure) feasibility facts.
+    void set_feasibility_cache(FeasibilityCache* cache) noexcept {
+        shared_feas_ = cache;
+    }
 
     // Partition `candidates` by their pattern against `guess_idx`.
     [[nodiscard]] static std::array<std::vector<uint16_t>, PATTERN_COUNT>
@@ -174,6 +232,9 @@ private:
     // so the production build (which calls it once per node) doesn't recompute
     // the full-vocabulary entropy ranking for recurring candidate sets.
     mutable std::unordered_map<std::uint64_t, uint16_t> feas_choice_;
+    // Optional cross-instance feasibility cache (set via set_feasibility_cache);
+    // when non-null it supersedes feas_memo_/feas_witness_ for is_feasible().
+    FeasibilityCache* shared_feas_{nullptr};
     mutable Stats stats_;
     [[nodiscard]] double entropy_simple(std::span<const uint16_t> candidates,
                                         uint16_t guess_idx) const noexcept;

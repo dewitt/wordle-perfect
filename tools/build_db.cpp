@@ -121,6 +121,7 @@ struct BuildResult {
     EntropySolver::Stats emit_stats{};
     std::size_t   emit_feas_memo  = 0;
     std::size_t   emit_choice_memo = 0;
+    std::size_t   sweep_feas_cache = 0;  // shared feasibility cache size
 };
 
 void accumulate(EntropySolver::Stats& acc, const EntropySolver::Stats& s) {
@@ -168,8 +169,14 @@ BuildResult build_tree(const WordList& wl, const PatternMatrix& pm,
         int best_total = std::numeric_limits<int>::max();
         uint16_t best_opener = WordList::NPOS;
 
+        // Shared feasibility cache: is_feasible() is opener-independent, so all
+        // workers reuse each other's results instead of recomputing overlapping
+        // subtrees (the dominant cost in the baseline sweep).
+        FeasibilityCache feas_cache;
+
         auto worker = [&]() {
             EntropySolver solver{wl, pm};
+            solver.set_feasibility_cache(&feas_cache);
             for (;;) {
                 std::size_t i = next.fetch_add(1, std::memory_order_relaxed);
                 if (i >= openers.size()) break;
@@ -192,6 +199,7 @@ BuildResult build_tree(const WordList& wl, const PatternMatrix& pm,
         for (auto& th : pool) th.join();
         prog.finish(done.load());
         result.sweep_s = elapsed_s(sweep_t0);
+        result.sweep_feas_cache = feas_cache.size();
 
         if (best_opener == WordList::NPOS)
             die(std::format("no opener solves the set within worst-case {}", worst_cap));
@@ -510,8 +518,9 @@ int main(int argc, char** argv) {
     std::println("  emit : {} nodes @ {:.0f}/s", nodes_written, emit_rate);
     std::println("  feasibility: {} calls, {:.1f}% memo-hit, {} recursions, {} partitions",
         agg.feasible_calls, feas_hit_rate * 100.0, agg.feasible_recur, agg.partitions);
-    std::println("  choice memo: {} calls, {} hits; memo sizes feas={} choice={}",
-        agg.choice_calls, agg.choice_hits, res.emit_feas_memo, res.emit_choice_memo);
+    std::println("  choice memo: {} calls, {} hits; memo sizes feas={} choice={} shared_feas={}",
+        agg.choice_calls, agg.choice_hits, res.emit_feas_memo, res.emit_choice_memo,
+        res.sweep_feas_cache);
 
     // Machine-readable single line for tracking/diffing across runs. Stable
     // key=value schema; append-only. Grep-friendly prefix "WPMETRICS".
@@ -522,7 +531,8 @@ int main(int argc, char** argv) {
         "finalize_s={:.3f} binary_s={:.3f} build_s={:.3f} wall_s={:.3f} "
         "sweep_openers_per_s={:.2f} emit_nodes_per_s={:.1f} "
         "feas_calls={} feas_hits={} feas_recur={} feas_hit_rate={:.4f} "
-        "partitions={} choice_calls={} choice_hits={} feas_memo={} choice_memo={}",
+        "partitions={} choice_calls={} choice_hits={} feas_memo={} choice_memo={} "
+        "shared_feas_cache={}",
         strategy_label, meta.start_word, ev.worst, ev.mean, nodes_written,
         ans->size(), wl->size(), nthreads, top, sweep_lookahead, emit_lookahead,
         res.openers_swept, matrix_s, res.sweep_s, res.emit_s, eval_s,
@@ -530,6 +540,6 @@ int main(int argc, char** argv) {
         sweep_rate, emit_rate,
         agg.feasible_calls, agg.feasible_hits, agg.feasible_recur, feas_hit_rate,
         agg.partitions, agg.choice_calls, agg.choice_hits,
-        res.emit_feas_memo, res.emit_choice_memo);
+        res.emit_feas_memo, res.emit_choice_memo, res.sweep_feas_cache);
     return 0;
 }

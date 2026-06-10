@@ -195,7 +195,17 @@ bool EntropySolver::is_feasible(std::span<const uint16_t> candidates, int depth,
     if (depth == 2 && n > PATTERN_COUNT) return false;
 
     const std::uint64_t key = feas_hash(candidates, depth);
-    if (auto it = feas_memo_.find(key); it != feas_memo_.end()) {
+    // Shared cross-worker cache (sweep) takes precedence over the per-instance
+    // memo when configured; either way is_feasible is a pure function of (set,
+    // depth) so cached facts are reusable across openers and threads.
+    if (shared_feas_) {
+        FeasibilityCache::Entry e;
+        if (shared_feas_->get(key, e)) {
+            ++stats_.feasible_hits;
+            if (e.status == 1 && witness) *witness = e.witness;
+            return e.status == 1;
+        }
+    } else if (auto it = feas_memo_.find(key); it != feas_memo_.end()) {
         ++stats_.feasible_hits;
         if (it->second == 1 && witness) {
             if (auto w = feas_witness_.find(key); w != feas_witness_.end())
@@ -237,8 +247,13 @@ bool EntropySolver::is_feasible(std::span<const uint16_t> candidates, int depth,
         if (all_ok) { ok = true; chosen = gi; break; }
     }
 
-    feas_memo_[key] = ok ? 1 : 2;
-    if (ok) { feas_witness_[key] = chosen; if (witness) *witness = chosen; }
+    if (shared_feas_) {
+        shared_feas_->put(key, {static_cast<char>(ok ? 1 : 2), chosen});
+    } else {
+        feas_memo_[key] = ok ? 1 : 2;
+        if (ok) feas_witness_[key] = chosen;
+    }
+    if (ok && witness) *witness = chosen;
     return ok;
 }
 
