@@ -110,7 +110,27 @@ double entropy_of(const PatternMatrix& pm, const std::vector<uint16_t>& cand, ui
 // the sweep multiplies its cost by ~the lookahead and the opener count — a
 // 14,855-opener × lookahead-30 sweep is ~tens of hours. Keep the sweep at 1.
 // ---------------------------------------------------------------------------
-struct BuildResult { uint16_t opener; std::uint64_t nodes; };
+struct BuildResult {
+    uint16_t      opener;
+    std::uint64_t nodes;
+    std::size_t   openers_swept   = 0;   // 0 if a forced opener skipped the sweep
+    double        sweep_s         = 0.0;
+    double        emit_s          = 0.0;
+    // Aggregated solver instrumentation (sweep workers + emit solver).
+    EntropySolver::Stats sweep_stats{};
+    EntropySolver::Stats emit_stats{};
+    std::size_t   emit_feas_memo  = 0;
+    std::size_t   emit_choice_memo = 0;
+};
+
+void accumulate(EntropySolver::Stats& acc, const EntropySolver::Stats& s) {
+    acc.feasible_calls += s.feasible_calls;
+    acc.feasible_hits  += s.feasible_hits;
+    acc.feasible_recur += s.feasible_recur;
+    acc.partitions     += s.partitions;
+    acc.choice_calls   += s.choice_calls;
+    acc.choice_hits    += s.choice_hits;
+}
 
 BuildResult build_tree(const WordList& wl, const PatternMatrix& pm,
                        Database& db, const std::vector<uint16_t>& cand,
@@ -118,6 +138,7 @@ BuildResult build_tree(const WordList& wl, const PatternMatrix& pm,
                        std::size_t emit_lookahead, std::size_t top,
                        uint16_t forced_root, unsigned nthreads) {
     const int n = static_cast<int>(cand.size());
+    BuildResult result;
 
     uint16_t opener = forced_root;
     if (opener == WordList::NPOS) {
@@ -134,10 +155,12 @@ BuildResult build_tree(const WordList& wl, const PatternMatrix& pm,
             return a.second < b.second;
         });
         if (top > 0 && openers.size() > top) openers.resize(top);
+        result.openers_swept = openers.size();
 
         std::println("  sweeping {} openers across {} threads (sweep lookahead {})...",
             openers.size(), nthreads, sweep_lookahead);
         Progress prog{"  opener sweep", static_cast<std::uint64_t>(openers.size())};
+        const auto sweep_t0 = Clock::now();
 
         std::atomic<std::size_t> next{0};
         std::atomic<std::size_t> done{0};
@@ -149,7 +172,7 @@ BuildResult build_tree(const WordList& wl, const PatternMatrix& pm,
             EntropySolver solver{wl, pm};
             for (;;) {
                 std::size_t i = next.fetch_add(1, std::memory_order_relaxed);
-                if (i >= openers.size()) return;
+                if (i >= openers.size()) break;
                 uint16_t gi = openers[i].second;
                 int total = solver.tree_total_for_opener(cand, gi, worst_cap, sweep_lookahead);
                 std::size_t d = done.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -159,12 +182,16 @@ BuildResult build_tree(const WordList& wl, const PatternMatrix& pm,
                     if (total < best_total) { best_total = total; best_opener = gi; }
                 }
             }
+            // Fold this worker's solver counters into the shared accumulator.
+            std::lock_guard lock(best_mtx);
+            accumulate(result.sweep_stats, solver.stats());
         };
         std::vector<std::thread> pool;
         for (unsigned t = 1; t < nthreads; ++t) pool.emplace_back(worker);
         worker();
         for (auto& th : pool) th.join();
         prog.finish(done.load());
+        result.sweep_s = elapsed_s(sweep_t0);
 
         if (best_opener == WordList::NPOS)
             die(std::format("no opener solves the set within worst-case {}", worst_cap));
@@ -179,6 +206,7 @@ BuildResult build_tree(const WordList& wl, const PatternMatrix& pm,
     EntropySolver solver{wl, pm};
     if (auto r = db.begin_transaction(); !r) die(r.error());
     Progress prog{"  building tree", std::uint64_t{0}, "nodes"};
+    const auto emit_t0 = Clock::now();
     std::uint64_t nodes = 0;
     uint32_t next_id = 0;
 
@@ -205,7 +233,14 @@ BuildResult build_tree(const WordList& wl, const PatternMatrix& pm,
     emit(cand, worst_cap, opener);
     prog.finish(nodes);
     if (auto r = db.commit_transaction(); !r) die(r.error());
-    return {opener, nodes};
+    result.emit_s          = elapsed_s(emit_t0);
+    result.emit_stats      = solver.stats();
+    result.emit_feas_memo  = solver.feas_memo_size();
+    result.emit_choice_memo = solver.choice_memo_size();
+
+    result.opener = opener;
+    result.nodes  = nodes;
+    return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -326,6 +361,8 @@ int main(int argc, char** argv) {
     if (!ans) die(ans.error());
     std::println("{} answers", ans->size());
 
+    const auto wall_t0 = Clock::now();
+
     // ── Pattern matrix ──────────────────────────────────────────────────────────
     const auto N = wl->size();
     std::print("building pattern matrix ({} × {} = {} entries, {} MB)... ",
@@ -333,7 +370,8 @@ int main(int argc, char** argv) {
     std::cout.flush();
     auto t0 = Clock::now();
     auto pm = PatternMatrix::build(*wl, nthreads);
-    std::println("done ({:.1f}s)", elapsed_s(t0));
+    const double matrix_s = elapsed_s(t0);
+    std::println("done ({:.1f}s)", matrix_s);
 
     // ── Database ──────────────────────────────────────────────────────────────
     std::print("creating {}... ", out_path); std::cout.flush();
@@ -375,24 +413,25 @@ int main(int argc, char** argv) {
     }
 
     // ── Build ───────────────────────────────────────────────────────────────────
-    std::uint64_t nodes_written = 0;
     t0 = Clock::now();
-
     std::println("building decision tree (worst<={}, emit-lookahead={}, {} threads)...",
         target_depth, emit_lookahead, nthreads);
     auto res = build_tree(*wl, pm, *db, answer_indices, target_depth,
                           sweep_lookahead, emit_lookahead, top,
                           fixed_root, nthreads);
-    nodes_written = res.nodes;
+    const std::uint64_t nodes_written = res.nodes;
+    const double build_s = elapsed_s(t0);
     // Label records *what was done*, not a quality claim: "minimax" = worst-case
     // minimised (provably optimal at 5); the mean is heuristic, not claimed optimal.
     const std::string strategy_label =
         std::format("minimax-worst{}-lookahead{}", target_depth, emit_lookahead);
-    std::println("tree built in {:.1f}s  ({} nodes)", elapsed_s(t0), nodes_written);
+    std::println("tree built in {:.1f}s  ({} nodes)", build_s, nodes_written);
 
     // ── Evaluate (independent verification → stored metadata) ─────────────────
     std::println("evaluating against {} answers...", ans->size());
+    t0 = Clock::now();
     auto ev = evaluate(*db, *wl, *ans);
+    const double eval_s = elapsed_s(t0);
     std::println("evaluation: worst={} mean={:.4f} solved={} failures={}",
         ev.worst, ev.mean, ev.solved, ev.failures);
 
@@ -416,11 +455,16 @@ int main(int argc, char** argv) {
     };
     if (auto ri = db->node_info(Database::ROOT_ID); ri)
         meta.start_word = std::string(wl->operator[](ri->first).view());
+    t0 = Clock::now();
     if (auto r = db->finalize(meta); !r) die(r.error());
+    const double finalize_s = elapsed_s(t0);
 
+    double binary_s = 0.0;
     if (!binary_path.empty()) {
         std::print("exporting binary db to {}... ", binary_path); std::cout.flush();
+        t0 = Clock::now();
         if (auto r = BinaryDb::export_from(*db, meta, binary_path); !r) die(r.error());
+        binary_s = elapsed_s(t0);
         std::println("ok");
     }
 
@@ -433,6 +477,8 @@ int main(int argc, char** argv) {
         std::filesystem::remove(out_path + "-shm", ec);
     }
 
+    const double wall_s = elapsed_s(wall_t0);
+
     std::println("done.");
     std::println("  strategy    : {}", strategy_label);
     std::println("  start word  : {}", meta.start_word);
@@ -443,5 +489,47 @@ int main(int argc, char** argv) {
     std::println("  distribution:");
     for (int i = 1; i < static_cast<int>(ev.dist.size()); ++i)
         if (ev.dist[i] > 0) std::println("    {} guesses: {}", i, ev.dist[i]);
+
+    // ── Builder performance metrics (issue #28) ──────────────────────────────
+    // Aggregate solver work across the sweep + emit phases.
+    EntropySolver::Stats agg = res.sweep_stats;
+    accumulate(agg, res.emit_stats);
+    const double feas_hit_rate = agg.feasible_calls
+        ? double(agg.feasible_hits) / double(agg.feasible_calls) : 0.0;
+    const double sweep_rate = (res.openers_swept && res.sweep_s > 0.0)
+        ? double(res.openers_swept) / res.sweep_s : 0.0;
+    const double emit_rate = res.emit_s > 0.0 ? double(nodes_written) / res.emit_s : 0.0;
+
+    std::println("");
+    std::println("--- builder performance ---");
+    std::println("  phase times (s): matrix={:.2f} sweep={:.2f} emit={:.2f} "
+                 "eval={:.2f} finalize={:.2f} binary={:.2f} build={:.2f} wall={:.2f}",
+        matrix_s, res.sweep_s, res.emit_s, eval_s, finalize_s, binary_s, build_s, wall_s);
+    std::println("  sweep: {} openers @ {:.1f}/s ({} threads)",
+        res.openers_swept, sweep_rate, nthreads);
+    std::println("  emit : {} nodes @ {:.0f}/s", nodes_written, emit_rate);
+    std::println("  feasibility: {} calls, {:.1f}% memo-hit, {} recursions, {} partitions",
+        agg.feasible_calls, feas_hit_rate * 100.0, agg.feasible_recur, agg.partitions);
+    std::println("  choice memo: {} calls, {} hits; memo sizes feas={} choice={}",
+        agg.choice_calls, agg.choice_hits, res.emit_feas_memo, res.emit_choice_memo);
+
+    // Machine-readable single line for tracking/diffing across runs. Stable
+    // key=value schema; append-only. Grep-friendly prefix "WPMETRICS".
+    std::println(
+        "WPMETRICS schema=1 strategy={} start={} worst={} mean={:.4f} nodes={} "
+        "answers={} words={} jobs={} top={} sweep_lookahead={} emit_lookahead={} "
+        "openers_swept={} matrix_s={:.3f} sweep_s={:.3f} emit_s={:.3f} eval_s={:.3f} "
+        "finalize_s={:.3f} binary_s={:.3f} build_s={:.3f} wall_s={:.3f} "
+        "sweep_openers_per_s={:.2f} emit_nodes_per_s={:.1f} "
+        "feas_calls={} feas_hits={} feas_recur={} feas_hit_rate={:.4f} "
+        "partitions={} choice_calls={} choice_hits={} feas_memo={} choice_memo={}",
+        strategy_label, meta.start_word, ev.worst, ev.mean, nodes_written,
+        ans->size(), wl->size(), nthreads, top, sweep_lookahead, emit_lookahead,
+        res.openers_swept, matrix_s, res.sweep_s, res.emit_s, eval_s,
+        finalize_s, binary_s, build_s, wall_s,
+        sweep_rate, emit_rate,
+        agg.feasible_calls, agg.feasible_hits, agg.feasible_recur, feas_hit_rate,
+        agg.partitions, agg.choice_calls, agg.choice_hits,
+        res.emit_feas_memo, res.emit_choice_memo);
     return 0;
 }

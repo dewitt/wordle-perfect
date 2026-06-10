@@ -186,6 +186,7 @@ double EntropySolver::entropy_simple(std::span<const uint16_t> candidates,
 
 bool EntropySolver::is_feasible(std::span<const uint16_t> candidates, int depth,
                                 uint16_t* witness) const {
+    ++stats_.feasible_calls;
     const int n = static_cast<int>(candidates.size());
     if (n <= 1) { if (witness && n == 1) *witness = candidates[0]; return true; }
     if (depth <= 1) return false;
@@ -195,12 +196,14 @@ bool EntropySolver::is_feasible(std::span<const uint16_t> candidates, int depth,
 
     const std::uint64_t key = feas_hash(candidates, depth);
     if (auto it = feas_memo_.find(key); it != feas_memo_.end()) {
+        ++stats_.feasible_hits;
         if (it->second == 1 && witness) {
             if (auto w = feas_witness_.find(key); w != feas_witness_.end())
                 *witness = w->second;
         }
         return it->second == 1;
     }
+    ++stats_.feasible_recur;
 
     // Order guesses by max-bucket ascending (best splitters first → prune hard).
     const std::size_t W = words_.size();
@@ -223,6 +226,7 @@ bool EntropySolver::is_feasible(std::span<const uint16_t> candidates, int depth,
     uint16_t chosen = WordList::NPOS;
     for (auto& [mb, gi] : order) {
         if (depth - 1 == 1 && mb > 1) break;  // remaining can't solve in 1 guess
+        ++stats_.partitions;
         auto buckets = partition(candidates, gi, patterns_);
         bool all_ok = true;
         for (Pattern p = 0; p < PATTERN_COUNT && all_ok; ++p) {
@@ -299,6 +303,7 @@ int EntropySolver::tree_total_for_opener(std::span<const uint16_t> candidates,
 uint16_t EntropySolver::best_guess_feasible(std::span<const uint16_t> candidates,
                                             int budget,
                                             std::size_t lookahead) const {
+    ++stats_.choice_calls;
     const int n = static_cast<int>(candidates.size());
     if (n == 0) return WordList::NPOS;
     if (n == 1) return candidates[0];
@@ -309,8 +314,10 @@ uint16_t EntropySolver::best_guess_feasible(std::span<const uint16_t> candidates
     // candidate sets recur across the tree. Key on (set, budget, lookahead).
     const std::uint64_t ckey =
         feas_hash(candidates, budget) ^ (0xC0FFEEull * lookahead + 1);
-    if (auto it = feas_choice_.find(ckey); it != feas_choice_.end())
+    if (auto it = feas_choice_.find(ckey); it != feas_choice_.end()) {
+        ++stats_.choice_hits;
         return it->second;
+    }
 
     // Guarantee a feasible fallback exists (and warm the feasibility memo for
     // this set). The witness is a guess that keeps every bucket solvable within

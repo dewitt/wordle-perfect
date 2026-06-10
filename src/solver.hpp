@@ -135,6 +135,21 @@ public:
     [[nodiscard]] SolveResult solve(uint16_t answer_idx,
                                     int max_rounds = DEFAULT_MAX_ROUNDS) const;
 
+    // ── Instrumentation (builder performance, issue #28) ─────────────────────
+    // Lightweight counters for profiling the worst-case-bounded search. They are
+    // per-instance and incremented in the hot paths; cost is a single ++ each.
+    struct Stats {
+        std::uint64_t feasible_calls   = 0;  // is_feasible() invocations
+        std::uint64_t feasible_hits    = 0;  // ... served from the memo
+        std::uint64_t feasible_recur   = 0;  // ... that ran the full search
+        std::uint64_t partitions       = 0;  // partition() calls (a proxy for work)
+        std::uint64_t choice_calls     = 0;  // best_guess_feasible() invocations
+        std::uint64_t choice_hits      = 0;  // ... served from the choice memo
+    };
+    [[nodiscard]] const Stats& stats() const noexcept { return stats_; }
+    [[nodiscard]] std::size_t feas_memo_size()   const noexcept { return feas_memo_.size(); }
+    [[nodiscard]] std::size_t choice_memo_size() const noexcept { return feas_choice_.size(); }
+
 private:
     // Compute weighted Shannon entropy.
     [[nodiscard]] double entropy(
@@ -159,6 +174,7 @@ private:
     // so the production build (which calls it once per node) doesn't recompute
     // the full-vocabulary entropy ranking for recurring candidate sets.
     mutable std::unordered_map<std::uint64_t, uint16_t> feas_choice_;
+    mutable Stats stats_;
     [[nodiscard]] double entropy_simple(std::span<const uint16_t> candidates,
                                         uint16_t guess_idx) const noexcept;
     // Total depth (sum over candidates, direct hit = 1) under the entropy-greedy
