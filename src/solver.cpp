@@ -172,17 +172,56 @@ std::uint64_t feas_hash(std::span<const uint16_t> s, int depth) {
     mix(static_cast<std::uint64_t>(depth));
     return h;
 }
-}  // namespace
 
-double EntropySolver::entropy_simple(std::span<const uint16_t> candidates,
-                                     uint16_t guess_idx) const noexcept {
-    std::array<int, PATTERN_COUNT> cnt{};
-    for (uint16_t ai : candidates) ++cnt[patterns_.get(guess_idx, ai)];
-    const double tot = static_cast<double>(candidates.size());
-    double H = 0.0;
-    for (int c : cnt) if (c) { double p = c / tot; H -= p * std::log2(p); }
-    return H;
+// Largest bucket size when `gi` partitions `candidates`, using a reusable
+// thread-local histogram cleared sparsely (only the patterns we touched). This
+// is in the hottest loop of the sweep — ranking all ~15k guesses per
+// feasibility node — so it avoids per-call allocation and avoids zeroing all
+// 243 buckets every time (the candidate set usually touches far fewer).
+[[gnu::hot]] int max_bucket_size(const PatternMatrix& pm,
+                                 std::span<const uint16_t> candidates,
+                                 uint16_t gi) noexcept {
+    thread_local std::array<uint16_t, PATTERN_COUNT> hist{};   // stays zeroed between calls
+    Pattern seen[PATTERN_COUNT];   // distinct patterns touched (≤ 243)
+    int nseen = 0;
+    int mb = 0;
+    for (uint16_t ai : candidates) {
+        const Pattern p = pm.get(gi, ai);
+        const int c = ++hist[p];
+        if (c == 1) seen[nseen++] = p;   // first time we hit this bucket
+        if (c > mb) mb = c;
+    }
+    for (int i = 0; i < nseen; ++i) hist[seen[i]] = 0;   // sparse reset
+    return mb;
 }
+
+// Single-pass partition score: returns max-bucket and (unweighted) Shannon
+// entropy in one histogram pass, so best_guess_feasible doesn't compute the
+// histogram twice (once for the no-progress filter, once for entropy).
+struct GuessScore { int max_bucket; double entropy; };
+[[gnu::hot]] GuessScore score_guess(const PatternMatrix& pm,
+                                    std::span<const uint16_t> candidates,
+                                    uint16_t gi) noexcept {
+    thread_local std::array<uint16_t, PATTERN_COUNT> hist{};
+    Pattern seen[PATTERN_COUNT];
+    int nseen = 0, mb = 0;
+    for (uint16_t ai : candidates) {
+        const Pattern p = pm.get(gi, ai);
+        const int c = ++hist[p];
+        if (c == 1) seen[nseen++] = p;
+        if (c > mb) mb = c;
+    }
+    const double total = static_cast<double>(candidates.size());
+    double H = 0.0;
+    for (int i = 0; i < nseen; ++i) {
+        const int c = hist[seen[i]];
+        const double pr = c / total;
+        H -= pr * std::log2(pr);
+        hist[seen[i]] = 0;   // sparse reset as we go
+    }
+    return {mb, H};
+}
+}  // namespace
 
 bool EntropySolver::is_feasible(std::span<const uint16_t> candidates, int depth,
                                 uint16_t* witness) const {
@@ -229,9 +268,7 @@ bool EntropySolver::is_feasible(std::span<const uint16_t> candidates, int depth,
     order.reserve(W);
     for (std::size_t g = 0; g < W; ++g) {
         const auto gi = static_cast<uint16_t>(g);
-        std::array<uint16_t, PATTERN_COUNT> cnt{};
-        int mb = 0;
-        for (uint16_t ai : candidates) { int c = ++cnt[patterns_.get(gi, ai)]; if (c > mb) mb = c; }
+        const int mb = max_bucket_size(patterns_, candidates, gi);
         if (mb == n) continue;  // no progress
         order.emplace_back(mb, gi);
     }
@@ -372,11 +409,9 @@ uint16_t EntropySolver::best_guess_feasible(std::span<const uint16_t> candidates
     order.reserve(W);
     for (std::size_t g = 0; g < W; ++g) {
         const auto gi = static_cast<uint16_t>(g);
-        std::array<uint16_t, PATTERN_COUNT> cnt{};
-        int mb = 0;
-        for (uint16_t ai : candidates) { int c = ++cnt[patterns_.get(gi, ai)]; if (c > mb) mb = c; }
-        if (mb == n) continue;
-        order.emplace_back(entropy_simple(candidates, gi), gi);
+        const auto sc = score_guess(patterns_, candidates, gi);
+        if (sc.max_bucket == n) continue;  // no progress
+        order.emplace_back(sc.entropy, gi);
     }
     const std::size_t pool = std::min<std::size_t>(EXPLORE_POOL, order.size());
     std::ranges::partial_sort(order, order.begin() + static_cast<std::ptrdiff_t>(pool),

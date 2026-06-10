@@ -236,8 +236,6 @@ private:
     // when non-null it supersedes feas_memo_/feas_witness_ for is_feasible().
     FeasibilityCache* shared_feas_{nullptr};
     mutable Stats stats_;
-    [[nodiscard]] double entropy_simple(std::span<const uint16_t> candidates,
-                                        uint16_t guess_idx) const noexcept;
     // Total depth (sum over candidates, direct hit = 1) under the entropy-greedy
     // feasible policy; used by best_guess_feasible's lookahead tie-break.
     [[nodiscard]] int feasible_total(std::span<const uint16_t> candidates,
