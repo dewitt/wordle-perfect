@@ -76,8 +76,35 @@ deterministic across runs. Result: wall **31.2s → 21.4s (−32%)**, sweep
 Why not the full 45-60× the kernel shows: only the *ranking* is offloaded; the
 recursion control flow, `partition`, and the GPU-result unpack stay on CPU, and
 per-node batches are small (a node's few buckets) so dispatch latency isn't fully
-amortised. Further gains would come from coarser batching (whole-level frontiers)
-and GPU-accelerating `best_guess_feasible`'s entropy ranking too.
+amortised.
+
+### Where is the wall? (ceiling experiment)
+
+To find the limit, a probe stubbed out `best_guess_feasible`'s entropy ranking
+(returning the feasible witness instead) on the `--gpu` build:
+
+- full `--gpu` build: sweep ≈18 s
+- with entropy ranking removed: **sweep ≈3.7 s, wall ≈6.0 s**
+
+So with the max-bucket feasibility ranking already on the GPU, **the entire
+remaining sweep cost is the CPU entropy ranking in `best_guess_feasible`.** If
+that could be offloaded with parity, the build would approach ~6 s (≈5× vs the
+30 s CPU baseline).
+
+The blocker is **float vs double**: the GPU computes entropy in `float`, and the
+tiny differences reorder near-entropy ties, changing the chosen guess and
+producing a *different but equally-optimal* (worst-5 / 3.4870) tree. We require
+byte-for-byte parity, so entropy ranking stays on the CPU in `double`.
+
+Attempts to bound the CPU entropy scan to just the GPU-identified
+progress-making guesses, or to GPU-presort then CPU-recompute a top pool, did
+**not** reliably beat the current `--gpu` path (run-to-run thermal variance on
+the M2 ≈±15% swamped the gains) and risked breaking parity. So the practical
+ceiling for a *parity-preserving* GPU integration is roughly the current ~18 s
+sweep; reaching ~6 s requires either accepting a different-but-optimal tree
+(GPU float entropy) or a bit-exact GPU entropy (Metal `double`, slower) — both
+deliberately not taken. Coarser whole-level batching could still trim the
+GPU-side `score_sets`/unpack overhead.
 
 ### Raw WPMETRICS datapoints
 
