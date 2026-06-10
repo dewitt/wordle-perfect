@@ -227,7 +227,7 @@ BuildResult build_tree(const WordList& wl, const PatternMatrix& pm,
         if (guess == WordList::NPOS)
             die(std::format("no feasible guess (set {}, budget {})",
                             set.size(), budget));
-        uint8_t round = static_cast<uint8_t>(worst_cap - budget + 1);
+        Depth round = static_cast<Depth>(worst_cap - budget + 1);
         if (auto r = db.insert_node(id, guess, round); !r) die(r.error());
         prog.update(++nodes);
         auto buckets = EntropySolver::partition(set, guess, pm);

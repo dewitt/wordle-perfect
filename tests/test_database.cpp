@@ -339,7 +339,7 @@ uint32_t build_greedy_tree(Database& db, const EntropySolver& solver,
                            uint32_t& next_id) {
     const uint32_t my_id = next_id++;
     const uint16_t guess = solver.best_guess(candidates);
-    REQUIRE(db.insert_node(my_id, guess, static_cast<uint8_t>(depth)).has_value());
+    REQUIRE(db.insert_node(my_id, guess, static_cast<Depth>(depth)).has_value());
 
     auto buckets = EntropySolver::partition(candidates, guess, pm);
     for (Pattern p = 0; p < PATTERN_COUNT - 1; ++p) {  // skip GGGGG

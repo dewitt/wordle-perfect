@@ -86,7 +86,7 @@ public:
     [[nodiscard]] std::size_t n() const noexcept { return n_; }
 
 private:
-    std::vector<uint8_t> data_;
+    std::vector<Pattern> data_;   // row-major N×N, data_[gi*N + ai]
     std::size_t          n_{};
 };
 

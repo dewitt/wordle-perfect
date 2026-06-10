@@ -41,14 +41,14 @@ static_assert(sizeof(Header) == 64, "Header layout drift");
 
 struct NodeRec {
     uint16_t word_idx;
-    uint8_t  depth;
+    Depth    depth;
     uint8_t  _pad;
     uint32_t edge_off;      // first edge index; count = next.edge_off - edge_off
 };
 static_assert(sizeof(NodeRec) == 8, "NodeRec layout drift");
 
 struct EdgeRec {
-    uint8_t  pattern;
+    Pattern  pattern;
     uint8_t  _pad[3];
     uint32_t child;
 };
@@ -296,12 +296,12 @@ std::expected<DbMetadata, std::string> BinaryDb::read_metadata() const {
     return m;
 }
 
-std::expected<std::pair<uint16_t, uint8_t>, std::string>
+std::expected<std::pair<uint16_t, Depth>, std::string>
 BinaryDb::node_info(uint32_t node_id) const {
     if (node_id >= node_count_)
         return std::unexpected(std::format("node {} out of range", node_id));
     const NodeRec& n = nodes_of(base_)[node_id];
-    return std::pair<uint16_t, uint8_t>{n.word_idx, n.depth};
+    return std::pair<uint16_t, Depth>{n.word_idx, n.depth};
 }
 
 std::expected<uint32_t, std::string>

@@ -15,6 +15,10 @@ struct sqlite3_stmt;
 
 namespace wp {
 
+// Depth/round within the decision tree: the root guess is depth 1, its children
+// depth 2, etc. One byte suffices (worst case is 5; full-coverage 7).
+using Depth = std::uint8_t;
+
 // ---------------------------------------------------------------------------
 // DbMetadata — self-describing artifact record
 // ---------------------------------------------------------------------------
@@ -68,7 +72,7 @@ public:
     next_node(uint32_t node_id, Pattern pattern) const;
 
     // Node info (word_idx and depth) for display
-    [[nodiscard]] std::expected<std::pair<uint16_t, uint8_t>, std::string>
+    [[nodiscard]] std::expected<std::pair<uint16_t, Depth>, std::string>
     node_info(uint32_t node_id) const;
 
     // Word index at root (= optimal first guess)
@@ -79,7 +83,7 @@ public:
     [[nodiscard]] std::expected<void, std::string> commit_transaction();
 
     [[nodiscard]] std::expected<uint32_t, std::string>
-    insert_node(uint32_t id, uint16_t word_idx, uint8_t depth);
+    insert_node(uint32_t id, uint16_t word_idx, Depth depth);
 
     [[nodiscard]] std::expected<void, std::string>
     insert_edge(uint32_t parent, Pattern pattern, uint32_t child);
@@ -95,7 +99,7 @@ public:
 
     // Bulk export of the tree for conversion to other formats (e.g. BinaryDb).
     // NodeRow is ordered by id; EdgeRow is ordered by (parent, pattern).
-    struct NodeRow { uint32_t id; uint16_t word_idx; uint8_t depth; };
+    struct NodeRow { uint32_t id; uint16_t word_idx; Depth depth; };
     struct EdgeRow { uint32_t parent; Pattern pattern; uint32_t child; };
     [[nodiscard]] std::expected<std::vector<NodeRow>, std::string> all_nodes() const;
     [[nodiscard]] std::expected<std::vector<EdgeRow>, std::string> all_edges() const;

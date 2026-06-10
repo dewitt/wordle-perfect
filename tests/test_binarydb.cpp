@@ -210,7 +210,7 @@ TEST_CASE("BinaryDb - lookups match SQLite on the real answers tree", "[binarydb
         [&](std::vector<uint16_t> cand, int depth) -> uint32_t {
         uint32_t id = next_id++;
         uint16_t guess = solver.best_guess(cand);
-        REQUIRE(db->insert_node(id, guess, static_cast<uint8_t>(depth)).has_value());
+        REQUIRE(db->insert_node(id, guess, static_cast<Depth>(depth)).has_value());
         auto buckets = EntropySolver::partition(cand, guess, pm);
         for (Pattern p = 0; p < PATTERN_COUNT - 1; ++p) {
             if (buckets[p].empty()) continue;

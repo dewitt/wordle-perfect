@@ -39,7 +39,7 @@ public:
     // Build a scorer for an N×N pattern matrix (row-major: pm[g*N + a]).
     // Returns an error string if Metal is unavailable or setup fails.
     [[nodiscard]] static std::expected<GpuScorer, std::string>
-    create(const std::uint8_t* pattern_matrix, std::uint32_t n);
+    create(const Pattern* pattern_matrix, std::uint32_t n);
 
     ~GpuScorer();
     GpuScorer(GpuScorer&&) noexcept;

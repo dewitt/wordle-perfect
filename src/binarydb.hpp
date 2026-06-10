@@ -82,7 +82,7 @@ public:
     next_node(uint32_t node_id, Pattern pattern) const;
 
     // word_idx + depth for a node.
-    [[nodiscard]] std::expected<std::pair<uint16_t, uint8_t>, std::string>
+    [[nodiscard]] std::expected<std::pair<uint16_t, Depth>, std::string>
     node_info(uint32_t node_id) const;
 
     [[nodiscard]] std::expected<uint16_t, std::string> root_word() const;

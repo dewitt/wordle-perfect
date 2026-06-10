@@ -82,7 +82,7 @@ struct GpuScorerImpl {
 };
 
 std::expected<GpuScorer, std::string>
-GpuScorer::create(const std::uint8_t* pattern_matrix, std::uint32_t n) {
+GpuScorer::create(const Pattern* pattern_matrix, std::uint32_t n) {
     @autoreleasepool {
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
         if (!device) return std::unexpected("no Metal device available");
@@ -114,9 +114,11 @@ GpuScorer::create(const std::uint8_t* pattern_matrix, std::uint32_t n) {
             [device newBufferWithLength:pm_bytes options:MTLResourceStorageModeShared];
         if (!pm_buf) return std::unexpected("failed to allocate pattern buffer");
         {
+            // dst is the raw Metal device buffer (bytes); the source is Pattern
+            // data. Pattern is a byte, so the transposed copy is a byte copy.
             auto* dst = static_cast<std::uint8_t*>(pm_buf.contents);
             for (std::uint32_t g = 0; g < n; ++g) {
-                const std::uint8_t* row = pattern_matrix + static_cast<std::size_t>(g) * n;
+                const Pattern* row = pattern_matrix + static_cast<std::size_t>(g) * n;
                 for (std::uint32_t a = 0; a < n; ++a)
                     dst[static_cast<std::size_t>(a) * n + g] = row[a];
             }

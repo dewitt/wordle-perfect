@@ -88,8 +88,8 @@ int main(int argc, char** argv) {
     std::println("CPU: {:.2f} ms/iter (score all {} guesses)", cpu_ms, N);
 
 #ifdef WP_HAVE_METAL
-    // Need the raw row-major matrix pointer for the GPU upload.
-    static std::vector<std::uint8_t> flat(static_cast<std::size_t>(N) * N);
+    // Flatten the matrix into a contiguous row-major buffer for the GPU upload.
+    static std::vector<Pattern> flat(static_cast<std::size_t>(N) * N);
     for (std::uint32_t g = 0; g < N; ++g)
         for (std::uint32_t a = 0; a < N; ++a)
             flat[static_cast<std::size_t>(g) * N + a] =

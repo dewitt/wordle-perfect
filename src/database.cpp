@@ -298,7 +298,7 @@ Database::next_node(uint32_t node_id, Pattern pattern) const {
     return child;
 }
 
-std::expected<std::pair<uint16_t, uint8_t>, std::string>
+std::expected<std::pair<uint16_t, Depth>, std::string>
 Database::node_info(uint32_t node_id) const {
     // Lazy-prepare and cache the statement; reset on reuse.
     if (!stmt_node_info_) {
@@ -318,7 +318,7 @@ Database::node_info(uint32_t node_id) const {
     }
 
     auto word_idx = static_cast<uint16_t>(sqlite3_column_int(stmt_node_info_, 0));
-    auto depth    = static_cast<uint8_t>(sqlite3_column_int(stmt_node_info_, 1));
+    auto depth    = static_cast<Depth>(sqlite3_column_int(stmt_node_info_, 1));
     // Reset immediately so the statement doesn't hold an implicit read
     // transaction open on the connection between calls.
     sqlite3_reset(stmt_node_info_);
@@ -353,7 +353,7 @@ std::expected<void, std::string> Database::commit_transaction() {
 }
 
 std::expected<uint32_t, std::string>
-Database::insert_node(uint32_t id, uint16_t word_idx, uint8_t depth) {
+Database::insert_node(uint32_t id, uint16_t word_idx, Depth depth) {
     StmtGuard st;
     if (sqlite3_prepare_v2(db_,
             "INSERT INTO nodes(id, word_idx, depth) VALUES(?,?,?)",
@@ -467,7 +467,7 @@ Database::all_nodes() const {
         rows.push_back({
             static_cast<uint32_t>(sqlite3_column_int(*st, 0)),
             static_cast<uint16_t>(sqlite3_column_int(*st, 1)),
-            static_cast<uint8_t>(sqlite3_column_int(*st, 2)),
+            static_cast<Depth>(sqlite3_column_int(*st, 2)),
         });
     }
     return rows;
