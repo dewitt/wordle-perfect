@@ -26,9 +26,10 @@ the curated answer set (it is mathematically impossible to guarantee 4 or fewer)
 The tree is produced by a feasibility-constrained search: a **parallel sweep**
 over candidate openers picks the one whose worst-case-5 tree has the lowest mean,
 where at each node the builder takes the highest-entropy guess that keeps every
-branch solvable within the remaining depth. A wider `--lookahead` pushes the mean
-toward the ~3.42 theoretical optimum at higher build cost (see issue #26). Build
-the default optimal DB with:
+branch solvable within the remaining depth. The default build takes ~1 minute.
+A wider `--lookahead` refines the winning opener's tree toward the ~3.42
+theoretical optimum at higher build cost (e.g. `--lookahead 30` → mean **3.4679**
+in ~80s; see issue #26). Build the default optimal DB with:
 
 ```sh
 ./build/build_db --output wordle.db
@@ -116,7 +117,7 @@ All commands accept `--db <path>` (default: `wordle.db`), `--words <path>` (defa
 - **Pattern matrix** — precomputed N×N table of Wordle response patterns (220M entries, ~210 MB in memory, built in ~0.5s using all CPU cores). Allows all partition and entropy computations to be pure memory accesses.
 - **EntropySolver** — dynamic solver used during precomputation. At each node, picks the guess maximising weighted Shannon entropy over the remaining candidate set. Answer-list words are weighted 1000× to bias the tree toward better performance on likely answers.
 - **build_db** — the single decision-tree builder, with two strategies:
-  - **`optimal` (default)** — the headline, provably worst-case-optimal builder. A DFS minimax (`src/solver.cpp` `is_feasible`) establishes which candidate sets are solvable within a depth bound (memoized on the sorted candidate set, guesses ordered by max-bucket-size for hard alpha-beta pruning). A **parallel opener sweep** then evaluates each candidate first guess on its own worker thread (private feasibility memo, atomic work-stealing) and keeps the opener whose worst-case-5 tree has the lowest mean. At each node the chosen guess is the highest-entropy one that keeps every branch feasible (`best_guess_feasible`); `--lookahead` expands the top-N feasible guesses to lower the mean further. `--start-word` skips the sweep; `--top` caps it.
+  - **`optimal` (default)** — the headline, provably worst-case-optimal builder. A DFS minimax (`src/solver.cpp` `is_feasible`) establishes which candidate sets are solvable within a depth bound (memoized on the sorted candidate set, guesses ordered by max-bucket-size for hard alpha-beta pruning). A **parallel opener sweep** then evaluates the top-`--top` (default 50) entropy-ranked openers, each on its own worker thread (private feasibility memo, atomic work-stealing), and keeps the one whose worst-case-5 tree has the lowest mean (the sweep itself runs at lookahead 1, so it's ~1 min). At each node the chosen guess is the highest-entropy one that keeps every branch feasible (`best_guess_feasible`). `--lookahead K` then refines **only the winning opener's** tree by expanding the top-K feasible guesses per node (lower mean, more time). `--start-word` skips the sweep; `--sweep-lookahead` tunes the sweep itself (rarely needed).
   - **`legacy` (`--strategy legacy`)** — answer-weighted entropy with **budget-aware escalation** (`best_guess_within_budget`): the fast greedy guess unless it would blow the depth budget, then full alpha-beta minimax for small candidate sets (≤ 64) or a top-24 beam re-search for large ones. Reaches worst-case 6; kept for comparison.
 
   Every build writes SQLite in a single transaction, exports a flat binary alongside (`<output>.bin`; `--no-binary` to disable), and runs an independent `evaluate()` pass so the stored worst-case/mean are *measured*, not assumed. `--full` covers all guess words; `--jobs` sets thread count.

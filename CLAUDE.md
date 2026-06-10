@@ -43,7 +43,7 @@ A Wordle solver that precomputes the best-known decision tree over all valid Wor
 - Worst case: **5 guesses** — the proven optimum for the curated answer set (4 is impossible). All 2,355 answers solved, 0 failures.
 - Mean depth: **3.4870 guesses** (lookahead 1, parallel opener sweep picks reast)
 - Distribution: 41×2, 1176×3, 1072×4, 66×5 (zero 6+)
-- Built by `build_db --output wordle.db` (parallel sweep) in ~1 min on 8 cores; `--lookahead K` lowers the mean further (slower); `--start-word W` skips the sweep
+- Built by `build_db --output wordle.db` (parallel sweep of top-50 openers @ sweep-lookahead 1) in ~1 min on 8 cores; `--lookahead K` refines the winner's tree (e.g. K=30 → 3.4679, ~80s); `--start-word W` skips the sweep; `--top 0` sweeps all openers
 - worst/mean are measured by the built-in `evaluate()` (SQLite==binary parity)
 
 **Legacy database results (`--strategy legacy`, start word: tarse):**
@@ -63,7 +63,7 @@ A Wordle solver that precomputes the best-known decision tree over all valid Wor
   - **Legacy** (`--strategy legacy --full`): worst-case 8, mean 4.1280; lower mean but a deeper worst case.
 
 **Architecture summary:**
-- **Default `optimal` strategy**: `build_optimal` runs a parallel opener sweep — each worker thread (own `EntropySolver`, private feasibility memo, atomic work-stealing) evaluates an opener via `tree_total_for_opener`; the lowest-mean feasible opener wins, then the tree is emitted node-by-node via `best_guess_feasible` (warm memo). `--start-word` skips the sweep; `--top` caps it; `--lookahead` lowers the mean.
+- **Default `optimal` strategy**: `build_optimal` runs a parallel opener sweep — each worker thread (own `EntropySolver`, private feasibility memo, atomic work-stealing) evaluates an opener via `tree_total_for_opener` at the cheap **sweep_lookahead** (default 1); the lowest-mean feasible opener wins, then the tree is emitted node-by-node via `best_guess_feasible` at **emit_lookahead** (`--lookahead`, default 1, winner only). The two lookaheads are separate so a high `--lookahead` refines the final mean without multiplying the sweep cost. `--start-word` skips the sweep; `--top` (default 50) caps it.
 - **Legacy strategy** is driven by `EntropySolver::best_guess_within_budget`: take the greedy entropy guess, but if its greedy worst-case continuation would exceed the remaining depth budget, escalate.
 - Escalation: candidate sets ≤ `ESCALATE_MAX_CANDIDATES` (64) use full alpha-beta `minimax_best_guess`; larger sets use `best_guess_beam` (probe the top-`beam_width` entropy guesses with a pruned `greedy_worst_depth`).
 - Minimax/greedy probes are seeded/pruned by `greedy_worst_depth()` (now with an `upper_bound` alpha cutoff); sub-calls restrict to the candidate pool (O(K^depth) instead of O(N^depth)).
@@ -77,7 +77,7 @@ A Wordle solver that precomputes the best-known decision tree over all valid Wor
 ## Known limitations
 
 - **`EvalResult::dist` is capped at depth 15** in `build_db.cpp`. Words solved at depth ≥ 16 would appear as failures. The current worst case is 8, so this is not a practical concern. (The CLI `eval` mode uses the shared `walk_target` with `WALK_DEPTH_CAP = 16` and reports true depths rather than capping at the DB's worst-case metric — issue #9, fixed.)
-- **Mean depth (3.5495) is above the ~3.42 theoretical optimum.** The worst-case-5 result is optimal, but the feasibility-constrained entropy-greedy + bounded-lookahead policy doesn't fully minimise the mean (exact mean-optimal DP over the full vocabulary is much more expensive). Wider `--lookahead` closes the gap (e.g. trace/lookahead-60 → 3.5393) at higher build cost. Closing to ~3.42 is remaining work on issue #8.
+- **Mean depth (3.4870 default, 3.4679 with `--lookahead 30`) is above the ~3.42 theoretical optimum.** The worst-case-5 result is optimal, but the feasibility-constrained entropy-greedy + bounded-lookahead policy doesn't fully minimise the mean (exact mean-optimal DP over the full vocabulary is much more expensive). Wider `--lookahead` closes the gap at higher build cost. Closing to ~3.42 is remaining work on issue #26.
 
 See the open GitHub issues for the remaining backlog from the code review — notably the SIMD/bitmask pattern path (#12, open) and the worst-case-5 exhaustive minimax (#8, open). The flat mmap'd binary DB (#13) is now implemented.
 
@@ -97,7 +97,7 @@ See the open GitHub issues for the remaining backlog from the code review — no
 | `src/solver.hpp/cpp` | `EntropySolver`: weighted entropy, minimax, beam re-search, `best_guess_within_budget`, `is_feasible`/`best_guess_feasible` (optimal worst-5); `DEPTH_IMPOSSIBLE` sentinel |
 | `src/database.hpp/cpp` | SQLite decision tree + templated `walk_target` helper + bulk `all_nodes`/`all_edges` export (read/write, checksum, metadata, cached hot-path stmts) |
 | `src/binarydb.hpp/cpp` | Flat mmap'd `.bin` decision tree (`BinaryDb`): header+checksum, direct-indexed nodes, CSR pattern-sorted edges; `export_from(Database)` + read-only mmap lookup |
-| `tools/build_db.cpp` | **The single decision-tree builder.** `--strategy optimal` (default): parallel feasibility-constrained opener sweep → worst-5, mean 3.4870. `--strategy legacy`: entropy/beam, worst-6. `--full` for full coverage. Always runs evaluate() for measured metadata; exports SQLite + binary. Flags: `--start-word`, `--lookahead`, `--top`, `--jobs`, `--target-depth`, `--answer-weight`, `--beam-width`, `--min-escalation-depth`, `--date`, `--binary`, `--no-binary` |
+| `tools/build_db.cpp` | **The single decision-tree builder.** `--strategy optimal` (default, worst-5 parallel sweep) | `legacy` (entropy/beam, worst-6); `--full` for full coverage. Always runs evaluate() for measured metadata; exports SQLite + binary. Flags: `--start-word`, `--lookahead` (emit refinement), `--sweep-lookahead`, `--top` (default 50; 0=all), `--jobs`, `--target-depth`, `--answer-weight`, `--beam-width`, `--min-escalation-depth`, `--date`, `--binary`, `--no-binary` |
 | `src/gpu_score.{hpp,mm}` | **Metal GPU scorer** — one-dispatch scoring of all guesses (max_bucket+entropy); transposed-matrix coalesced layout, 14.8× CPU |
 | `tools/gpu_bench.cpp` | GPU-vs-CPU scoring benchmark + parity check |
 | `src/main.cpp` | CLI entry point (`solve`, `play`, `eval`, `info`, `dump`); validates solve targets vs answers list |
