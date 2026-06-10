@@ -45,6 +45,33 @@ and the per-node ranking that scans all ~15k guesses. Next levers: cut the
 guess-pool scan (matrix-read locality / SIMD, #12), reduce FeasibilityCache lock
 contention, or seed the sweep's shared cache from a quick first pass.
 
+## GPU offload analysis (#28)
+
+Q: can the M2 GPU take the build's dominant work (the per-node 15k-guess scan)?
+
+Findings from instrumentation + benchmarks:
+- The feasibility recursion is **~40k tiny candidate sets** (probe: <64 cand
+  ≈39.7k nodes, 64–512 ≈250, **≥512: 0**) — each scans all ~15k guesses.
+- **Per-set** GPU dispatch loses: ~0.5 ms launch latency × 40k = ~20 s, and tiny
+  sets only get ~6.5× (vs 15× for big sets). The GPU is latency-bound here.
+- **Batched** GPU wins big — `GpuScorer::score_sets` scores all guesses against
+  many sets in one dispatch (benchmarked, exact parity):
+  - 2000 sets × 16 cand: CPU 10.6 s → GPU 0.22 s (**49×**)
+  - 2000 sets × 40 cand: CPU 17.2 s → GPU 0.30 s (**58×**)
+  - 2000 sets × 128 cand: CPU 23.3 s → GPU 0.52 s (**45×**)
+- Caveat: the GPU only pays off when the 220 MB pattern matrix is uploaded
+  **once** and reused across many dispatches. One-shot uses (e.g. the single
+  opener pre-ranking, ~50 ms on CPU) are net-negative (upload+transpose ≈100 ms).
+
+**Integration path (the real win, not yet landed):** restructure feasibility
+from depth-first one-set-at-a-time into a **level-synchronous frontier**: a node's
+non-empty buckets are a natural batch of sibling sets at the next depth, so
+`score_sets` ranks them in one dispatch over a GPU-resident matrix shared for the
+whole sweep. This must reproduce the exact CPU semantics (max-bucket order,
+break-on-first-feasible, largest-bucket-first) — so it lands as an opt-in,
+parity-validated path before becoming default. `score_sets` is built and proven;
+the frontier restructuring is the remaining work.
+
 ### Raw WPMETRICS datapoints
 
 ```
