@@ -248,7 +248,7 @@ std::expected<void, std::string> Database::write_metadata(const DbMetadata& m) {
         sqlite3_free(em);
     };
 
-    for (auto [key, val] : {
+    for (const auto& [key, val] : {
             std::pair{"words_source",     m.words_source},
             std::pair{"words_date",       m.words_date},
             std::pair{"answers_source",   m.answers_source},
