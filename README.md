@@ -2,41 +2,35 @@
 
 A Wordle solver built on precomputed, O(1)-lookup decision trees.
 
-The solver computes a **provably worst-case-optimal** decision tree — every one of the 2,355 curated NYT answers is solved in **at most 5 guesses** (it is mathematically impossible to guarantee 4), with a mean as low as **3.4870**. Among trees that hit the optimal worst case, it minimizes average depth via a feasibility-constrained, entropy-guided search: a parallel sweep over openers picks the lowest-mean tree, with optional lookahead refinement. Precomputed paths are stored so that each guess in a solve requires exactly one O(1) lookup with no runtime search: SQLite is the build-time format, and a flat `mmap`-able binary (`.bin`) is the dependency-free runtime format. The CLI auto-detects which it's given.
+The solver computes a decision tree that solves every one of the 2,355 curated NYT answers in **at most 5 guesses** with a mean of **3.4870**. The worst case of 5 is **provably optimal** for this answer set — it is mathematically impossible to guarantee 4. (The *mean* is a strong heuristic result, not claimed optimal; the true minimum is ≈3.42.) Among trees that hit worst-case 5, a parallel sweep over openers picks the one with the lowest mean. Precomputed paths are stored so that each guess in a solve requires exactly one O(1) lookup with no runtime search: SQLite is the build-time format, and a flat `mmap`-able binary (`.bin`) is the dependency-free runtime format. The CLI auto-detects which it's given.
 
 ## Current results
 
 Two precomputed databases are available. The standard DB is the default; the full-coverage DB is an optional fallback for resilience against future answer-list expansions.
 
-### Optimal database (`wordle.db`) — 2,355 curated answers, worst-case 5
+### Standard database (`wordle.db`) — 2,355 curated answers, worst-case 5
 
 | Metric | Value |
 |--------|-------|
 | Start word | **reast** (chosen by the parallel opener sweep) |
 | Answers covered | 2,355 (all known NYT answer words) |
 | Worst case | **5 guesses** (provably optimal — 4 is impossible) |
-| Mean depth | **3.4870 guesses** |
-| Strategy | `optimal-worst5-lookahead1` |
+| Mean depth | **3.4870 guesses** (heuristic; ≈3.42 is the true minimum) |
 | Per-query latency | O(1) lookup; mmap'd binary DB (`wordle.bin`) or SQLite (`wordle.db`) |
 
 Distribution (reast, lookahead 1): 41×2, 1176×3, 1072×4, 66×5.
 
-Every answer is solved in **at most 5 guesses** — matching the proven optimum for
-the curated answer set (it is mathematically impossible to guarantee 4 or fewer).
 The tree is produced by a feasibility-constrained search: a **parallel sweep**
 over candidate openers picks the one whose worst-case-5 tree has the lowest mean,
 where at each node the builder takes the highest-entropy guess that keeps every
 branch solvable within the remaining depth. The default build takes ~1 minute.
 A wider `--lookahead` refines the winning opener's tree toward the ~3.42
-theoretical optimum at higher build cost (e.g. `--lookahead 30` → mean **3.4679**
-in ~80s; see issue #26). Build the default optimal DB with:
+theoretical minimum at higher build cost (e.g. `--lookahead 30` → mean **3.4679**
+in ~80s; see issue #26). Build the default DB with:
 
 ```sh
 ./build/build_db --output wordle.db
 ```
-
-The legacy answer-weighted entropy/beam strategy (`--strategy legacy`) reaches
-worst-case 6 / mean 3.8144 and remains available for comparison.
 
 ### Full-coverage database — all 14,855 guess words
 
@@ -44,10 +38,8 @@ worst-case 6 / mean 3.8144 and remains available for comparison.
 ./build/build_db --full --output wordle-full.db
 ```
 
-This builds a worst-case-**7** tree (the optimal strategy applied to the full
-list), 0 failures, zero 8-guess words. Mean ≈ 4.17. The legacy strategy
-(`--strategy legacy --full`) yields worst-case 8 / mean 4.1280 — a lower mean but
-a deeper worst case. All deep words are obscure guess-list-only entries (coxed,
+This builds a worst-case-**7** tree over the full list, 0 failures, zero 8-guess
+words, mean ≈ 4.17. All deep words are obscure guess-list-only entries (coxed,
 waqfs, zills, …) that have never been NYT answers.
 
 ## Build
@@ -62,16 +54,15 @@ nix develop        # or: direnv allow
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 
-# Precompute the OPTIMAL worst-case-5 tree (default; parallel opener sweep)
+# Precompute the worst-case-5 tree (default; parallel opener sweep, ~1 min)
 ./build/build_db --output wordle.db
 
 #   ...with a forced opener (skips the sweep, faster):
 ./build/build_db --start-word reast --output wordle.db
 #   ...with mean refinement (slower, lower mean): add --lookahead 30
-#   ...legacy entropy/beam tree (worst-case 6):   --strategy legacy
 
 # Precompute the full-coverage tree (all 14,855 guess words as answers, worst-7)
-./build/build_db --full --start-word tares --output wordle-full.db
+./build/build_db --full --output wordle-full.db
 ```
 
 ## Testing
@@ -116,9 +107,7 @@ All commands accept `--db <path>` (default: `wordle.db`), `--words <path>` (defa
 
 - **Pattern matrix** — precomputed N×N table of Wordle response patterns (220M entries, ~210 MB in memory, built in ~0.5s using all CPU cores). Allows all partition and entropy computations to be pure memory accesses.
 - **EntropySolver** — dynamic solver used during precomputation. At each node, picks the guess maximising weighted Shannon entropy over the remaining candidate set. Answer-list words are weighted 1000× to bias the tree toward better performance on likely answers.
-- **build_db** — the single decision-tree builder, with two strategies:
-  - **`optimal` (default)** — the headline, provably worst-case-optimal builder. A DFS minimax (`src/solver.cpp` `is_feasible`) establishes which candidate sets are solvable within a depth bound (memoized on the sorted candidate set, guesses ordered by max-bucket-size for hard alpha-beta pruning). A **parallel opener sweep** then evaluates the top-`--top` (default 50) entropy-ranked openers, each on its own worker thread (private feasibility memo, atomic work-stealing), and keeps the one whose worst-case-5 tree has the lowest mean (the sweep itself runs at lookahead 1, so it's ~1 min). At each node the chosen guess is the highest-entropy one that keeps every branch feasible (`best_guess_feasible`). `--lookahead K` then refines **only the winning opener's** tree by expanding the top-K feasible guesses per node (lower mean, more time). `--start-word` skips the sweep; `--sweep-lookahead` tunes the sweep itself (rarely needed).
-  - **`legacy` (`--strategy legacy`)** — answer-weighted entropy with **budget-aware escalation** (`best_guess_within_budget`): the fast greedy guess unless it would blow the depth budget, then full alpha-beta minimax for small candidate sets (≤ 64) or a top-24 beam re-search for large ones. Reaches worst-case 6; kept for comparison.
+- **build_db** — the decision-tree builder. A DFS minimax (`src/solver.cpp` `is_feasible`) establishes which candidate sets are solvable within a depth bound (memoized on the sorted candidate set, guesses ordered by max-bucket-size for hard alpha-beta pruning) — this is what makes the worst-case-5 result provable. A **parallel opener sweep** then evaluates the top-`--top` (default 50) entropy-ranked openers, each on its own worker thread (private feasibility memo, atomic work-stealing), and keeps the one whose worst-case-5 tree has the lowest mean (the sweep runs at lookahead 1, so it's ~1 min). At each node the chosen guess is the highest-entropy one that keeps every branch feasible (`best_guess_feasible`). `--lookahead K` refines **only the winning opener's** tree by expanding the top-K feasible guesses per node (lower mean, more time). `--start-word` skips the sweep; `--sweep-lookahead` tunes the sweep (rarely needed). Note this minimises the worst case (provably optimal at 5); the mean is a heuristic, not claimed optimal.
 
   Every build writes SQLite in a single transaction, exports a flat binary alongside (`<output>.bin`; `--no-binary` to disable), and runs an independent `evaluate()` pass so the stored worst-case/mean are *measured*, not assumed. `--full` covers all guess words; `--jobs` sets thread count.
 - **Database (SQLite)** — the build-time format. FNV-1a checksum verified on every open. Nodes, edges, and metadata in three tables. ~16,521 nodes (standard DB) / ~16,543 nodes (full-coverage DB). Finalized as a single self-contained file (`journal_mode=DELETE`, no `-wal`/`-shm` sidecars). Hot-path lookup statements (`next_node`, `node_info`) are lazily prepared, cached, and reset after each read.
@@ -127,9 +116,9 @@ All commands accept `--db <path>` (default: `wordle.db`), `--words <path>` (defa
 
 ## Performance
 
-- **Parallel opener sweep** — the default `optimal` build fans the independent
-  per-opener evaluations across a thread pool with atomic work-stealing (3–5× on
-  8 cores). Tune with `--jobs` and `--top`.
+- **Parallel opener sweep** — the build fans the independent per-opener
+  evaluations across a thread pool with atomic work-stealing (3–5× on 8 cores).
+  Tune with `--jobs` and `--top`.
 - **Metal GPU node-scoring** (`gpu_bench`, Apple Silicon) — a compute shader
   scores all ~15k guesses against a candidate set in one dispatch. With a
   transposed (coalesced) matrix layout it runs **~15× faster than the CPU**,
