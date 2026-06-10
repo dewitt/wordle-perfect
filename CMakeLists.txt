@@ -31,6 +31,23 @@ add_link_options(
 find_package(SQLite3 REQUIRED)
 find_package(Threads REQUIRED)
 
+# ── Optional Metal GPU acceleration (Apple platforms only) ────────────────────
+# On macOS we compile the Obj-C++ Metal scorer and define WP_HAVE_METAL so the
+# code paths/benchmarks are available. Elsewhere everything builds without it.
+set(WP_METAL_SOURCES)
+set(WP_METAL_LIBS)
+if(APPLE)
+  find_library(METAL_FRAMEWORK Metal)
+  find_library(FOUNDATION_FRAMEWORK Foundation)
+  if(METAL_FRAMEWORK AND FOUNDATION_FRAMEWORK)
+    message(STATUS "Metal GPU acceleration: ENABLED")
+    list(APPEND WP_METAL_SOURCES src/gpu_score.mm)
+    list(APPEND WP_METAL_LIBS ${METAL_FRAMEWORK} ${FOUNDATION_FRAMEWORK})
+    set_source_files_properties(src/gpu_score.mm PROPERTIES
+      COMPILE_OPTIONS "-fobjc-arc")
+  endif()
+endif()
+
 # ── Core library (shared between main CLI and build tool) ─────────────────────
 add_library(wordle_core STATIC
   src/pattern.cpp
@@ -38,9 +55,13 @@ add_library(wordle_core STATIC
   src/solver.cpp
   src/database.cpp
   src/binarydb.cpp
+  ${WP_METAL_SOURCES}
 )
 target_include_directories(wordle_core PUBLIC src)
-target_link_libraries(wordle_core PUBLIC SQLite::SQLite3 Threads::Threads)
+target_link_libraries(wordle_core PUBLIC SQLite::SQLite3 Threads::Threads ${WP_METAL_LIBS})
+if(WP_METAL_SOURCES)
+  target_compile_definitions(wordle_core PUBLIC WP_HAVE_METAL)
+endif()
 
 # ── Main CLI ──────────────────────────────────────────────────────────────────
 add_executable(wordle src/main.cpp)
@@ -57,6 +78,10 @@ target_link_libraries(optimal PRIVATE wordle_core)
 # ── Parallel exact optimal solver (issue #27) ─────────────────────────────────
 add_executable(exact tools/exact.cpp)
 target_link_libraries(exact PRIVATE wordle_core)
+
+# ── GPU node-scoring benchmark (Metal; issue #12) ─────────────────────────────
+add_executable(gpu_bench tools/gpu_bench.cpp)
+target_link_libraries(gpu_bench PRIVATE wordle_core)
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
 enable_testing()
