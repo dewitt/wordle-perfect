@@ -139,6 +139,26 @@ All commands accept `--db <path>` (default: `wordle.db`), `--words <path>` (defa
 - **BinaryDb (flat mmap)** — the runtime format (`src/binarydb.*`). A single `mmap`-able file: fixed header (magic, version, counts, FNV-1a checksum, metadata) + a direct-indexed node array + a CSR-style edge array (per-node offset + pattern-sorted slice). `node_info` is a direct array index and `next_node` binary-searches a node's tiny edge slice — genuinely O(1), no SQLite dependency at runtime. ~42% smaller than the SQLite file and ~2× faster end-to-end. This is the format the `constant_time_lookup` invariant intends.
 - **wordle CLI** — thin layer over either backend (auto-detected by magic / `.bin` extension). Each solve step is one O(1) lookup. All commands — including `dump` — work against both formats. Solution mode validates targets against the answers list and gives a helpful error for valid-guess-but-not-answer inputs.
 
+## Performance tooling
+
+Two accelerators back the optimal-tree search:
+
+- **Parallel opener sweep** (`exact`) — fans the independent per-opener
+  evaluations across a thread pool with work-stealing (3–5× on 8 cores). Finds
+  and emits the best worst-case-5 tree; its best CLI-verified result is mean
+  **3.4938** (better than the single-threaded builder's 3.5495).
+  ```sh
+  ./build/exact --top 40 --jobs 8 --emit wordle.db
+  ```
+- **Metal GPU node-scoring** (`gpu_bench`, Apple Silicon) — a compute shader
+  scores all ~15k guesses against a candidate set in one dispatch. With a
+  transposed (coalesced) matrix layout it runs **~15× faster than the CPU**,
+  bit-for-bit identical. This is the hottest per-node operation and makes
+  full-word-list lookahead affordable.
+  ```sh
+  ./build/gpu_bench --iters 30      # verifies parity + reports speedup
+  ```
+
 ## Spec
 
 See [spec.md](spec.md) for the full behavioral specification in [dx format](https://github.com/dewitt/dx).

@@ -29,6 +29,8 @@ A Wordle solver that precomputes the best-known decision tree over all valid Wor
 - [x] Beam re-search — top-N entropy probe for large candidate sets where minimax is intractable (`best_guess_beam`)
 - [x] Budget-aware escalation — `best_guess_within_budget`: greedy unless it blows the depth budget, then minimax (small) or beam (large)
 - [x] **Optimal worst-case-5 tree (issue #8)** — `tools/optimal.cpp` + `EntropySolver::is_feasible`/`best_guess_feasible`: DFS minimax (memoized on the candidate set) proves the answer set is solvable in worst-case 5 (the proven optimum); feasibility-constrained entropy-greedy + `--lookahead` minimises mean. `optimal --emit` writes a verified worst-5 DB. trace/lookahead-30 → worst 5, mean 3.5495.
+- [x] **Parallel exact opener sweep (issue #27)** — `tools/exact.cpp`: thread-pool fan-out over openers (per-thread `EntropySolver`, atomic work-stealing). 3–5× multi-core speedup; `--emit` writes the best opener's tree, CLI-verified worst-5 / mean **3.4938** (reast/tarse, better than the optimal tool's 3.5495).
+- [x] **Metal GPU node-scoring (issue #12)** — `src/gpu_score.{hpp,mm}`: a compute shader scores all ~15k guesses (max_bucket + entropy) in one dispatch. Transposed-matrix (coalesced) layout → **14.8×** vs CPU (15.7× on the full list), verified identical. `tools/gpu_bench` benchmarks/verifies. Gated by `WP_HAVE_METAL`; non-Apple builds unaffected.
 - [x] Precomputation pipeline — `build_db` tool (legacy entropy/beam, worst 6); `optimal` tool (worst-5 optimal). SQLite decision tree (~1–2 min)
 - [x] CLI tool — `wordle` binary; `solve`, `play`, `eval`, `info`, `dump` modes
 - [x] Database integrity — FNV-1a checksum on every open
@@ -98,6 +100,9 @@ See the open GitHub issues for the remaining backlog from the code review — no
 | `src/binarydb.hpp/cpp` | Flat mmap'd `.bin` decision tree (`BinaryDb`): header+checksum, direct-indexed nodes, CSR pattern-sorted edges; `export_from(Database)` + read-only mmap lookup |
 | `tools/build_db.cpp` | Legacy precomputation pipeline (entropy/beam, worst 6); budget-aware escalation; exports SQLite + binary; flags incl. `--full`, `--target-depth`, `--min-escalation-depth`, `--beam-width`, `--date`, `--binary`, `--no-binary` |
 | `tools/optimal.cpp` | **Optimal worst-5 builder** — DFS minimax feasibility + entropy-greedy with `--lookahead`; `--mode tree --emit` writes a verified worst-5 DB (+ binary) |
+| `tools/exact.cpp` | **Parallel opener sweep** — thread-pool fan-out over openers (work-stealing); `--top`, `--jobs`, `--lookahead`, `--emit`. Best verified tree: worst-5, mean 3.4938 |
+| `src/gpu_score.{hpp,mm}` | **Metal GPU scorer** — one-dispatch scoring of all guesses (max_bucket+entropy); transposed-matrix coalesced layout, 14.8× CPU |
+| `tools/gpu_bench.cpp` | GPU-vs-CPU scoring benchmark + parity check |
 | `src/main.cpp` | CLI entry point (`solve`, `play`, `eval`, `info`, `dump`); validates solve targets vs answers list |
 | `data/words.txt` | 14,855 valid Wordle guesses (NYT, June 2026) |
 | `data/answers.txt` | 2,355 valid Wordle answers (NYT, June 2026; includes 40 post-acquisition additions) |
