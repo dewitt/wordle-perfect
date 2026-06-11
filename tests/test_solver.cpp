@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <numeric>
 #include <ranges>
 #include <thread>
 
@@ -279,4 +280,84 @@ TEST_CASE("best_guess_feasible - returns a feasible, splitting guess",
         if (buckets[p].size() <= 1) continue;
         CHECK(solver.is_feasible(buckets[p], 4));
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// min_total — exact minimal mean. Validated against an independent brute force.
+// ─────────────────────────────────────────────────────────────────────────────
+
+namespace {
+// Reference: exhaustive minimal total depth (direct hit = 1), no pruning, no
+// caching. Tries EVERY word as the guess. Slow but unimpeachably correct, so it
+// is the oracle for min_total's branch-and-bound on small inputs.
+int brute_min_total(const WordList& wl, const PatternMatrix& pm,
+                    std::span<const WordIndex> cand, int depth) {
+    const int n = static_cast<int>(cand.size());
+    if (n == 0) return 0;
+    if (n == 1) return 1;
+    if (depth <= 1) return EntropySolver::MIN_TOTAL_INFEASIBLE;
+
+    int best = EntropySolver::MIN_TOTAL_INFEASIBLE;
+    for (WordIndex gi = 0; gi < static_cast<WordIndex>(wl.size()); ++gi) {
+        auto buckets = EntropySolver::partition(cand, gi, pm);
+        if (buckets[PATTERN_SOLVED].size() == static_cast<std::size_t>(n))
+            continue;  // no progress (only happens if all map to one pattern)
+        bool feasible = true;
+        long total = n;  // everyone pays for this guess
+        for (Pattern p = 0; p < PATTERN_COUNT && feasible; ++p) {
+            if (p == PATTERN_SOLVED || buckets[p].empty()) continue;
+            int sub = (buckets[p].size() == 1)
+                        ? 1 : brute_min_total(wl, pm, buckets[p], depth - 1);
+            if (sub >= EntropySolver::MIN_TOTAL_INFEASIBLE) { feasible = false; break; }
+            total += sub;
+        }
+        if (feasible && total < best) best = static_cast<int>(total);
+    }
+    return best;
+}
+}  // namespace
+
+TEST_CASE("min_total - matches brute force on a small word list", "[solver][exact]") {
+    // A small list keeps the exhaustive oracle fast while exercising real
+    // partitions (multiple bucket sizes, recursion to depth 2-3).
+    auto wl = tiny_wordlist({
+        "crane", "slate", "trace", "blast", "brace", "grace",
+        "place", "plate", "stare", "share", "spare", "scare"});
+    auto pm = PatternMatrix::build(wl);
+    EntropySolver solver{wl, pm};
+
+    std::vector<WordIndex> cand(wl.size());
+    std::iota(cand.begin(), cand.end(), WordIndex{0});
+
+    for (int depth : {3, 4, 5}) {
+        const int got    = solver.min_total(cand, depth);
+        const int oracle = brute_min_total(wl, pm, cand, depth);
+        INFO("depth=" << depth);
+        CHECK(got == oracle);
+    }
+}
+
+TEST_CASE("min_total - recovers optimal guess and is <= greedy", "[solver][exact]") {
+    auto wl = tiny_wordlist({
+        "crane", "slate", "trace", "blast", "brace", "grace", "place"});
+    auto pm = PatternMatrix::build(wl);
+    EntropySolver solver{wl, pm};
+
+    std::vector<WordIndex> cand(wl.size());
+    std::iota(cand.begin(), cand.end(), WordIndex{0});
+
+    const int opt = solver.min_total(cand, 5);
+    REQUIRE(opt < EntropySolver::MIN_TOTAL_INFEASIBLE);
+    CHECK(opt == brute_min_total(wl, pm, cand, 5));
+
+    // The recorded optimal guess must reproduce the optimum when expanded.
+    WordIndex g = solver.optimal_guess(cand, 5);
+    REQUIRE(g != WordList::NPOS);
+    auto buckets = EntropySolver::partition(cand, g, pm);
+    long total = static_cast<long>(cand.size());
+    for (Pattern p = 0; p < PATTERN_COUNT; ++p) {
+        if (p == PATTERN_SOLVED || buckets[p].empty()) continue;
+        total += (buckets[p].size() == 1) ? 1 : solver.min_total(buckets[p], 4);
+    }
+    CHECK(total == opt);
 }

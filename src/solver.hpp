@@ -265,9 +265,19 @@ private:
     // the full-vocabulary entropy ranking for recurring candidate sets.
     mutable std::unordered_map<std::uint64_t, WordIndex> feas_choice_;
     // Transposition table for the exact min_total DP: key = hash(sorted set,
-    // depth) → {optimal total depth, optimal first guess}. Stores EXACT values
-    // (computed with no external bound), so entries are reusable and sound.
-    struct TotEntry { int total; WordIndex guess; };
+    // depth) → {proven lower bound, exact total (if solved), optimal guess}.
+    //   lower : best proven lower bound for this subset (always valid; only
+    //           grows). Used to tighten child-bucket floors during pruning.
+    //   total : the exact optimum if proven (== lower), else INFEASIBLE meaning
+    //           "not yet solved exactly" (the lower bound is still usable).
+    //   guess : optimal first guess (valid only when total is exact).
+    // A subset's lower bound is a sound floor regardless of the αβ `bound` the
+    // call ran under, so it is always safe to record and reuse.
+    struct TotEntry {
+        int       lower = 0;
+        int       total = std::numeric_limits<int>::max();  // INFEASIBLE = unsolved
+        WordIndex guess = WordList::NPOS;
+    };
     mutable std::unordered_map<std::uint64_t, TotEntry> tot_memo_;
     // Optional cross-instance feasibility cache (set via set_feasibility_cache);
     // when non-null it supersedes feas_memo_/feas_witness_ for is_feasible().
@@ -288,6 +298,9 @@ private:
     // feasible policy; used by best_guess_feasible's lookahead tie-break.
     [[nodiscard]] int feasible_total(std::span<const WordIndex> candidates,
                                      int budget) const;
+    // Best known admissible lower bound on min_total(b, depth): max of the
+    // structural floor 2|b|-1 and any tighter bound cached in tot_memo_.
+    [[nodiscard]] int cached_lower(std::span<const WordIndex> b, int depth) const;
 };
 
 // ---------------------------------------------------------------------------

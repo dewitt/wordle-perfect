@@ -499,13 +499,23 @@ int EntropySolver::min_total(std::span<const WordIndex> candidates, int depth,
 
     // (c) Transposition: exact value of S at `depth` is order-independent.
     const std::uint64_t key = feas_hash(candidates, depth) ^ 0x6D7E'A11Cull;
-    if (auto it = tot_memo_.find(key); it != tot_memo_.end()) return it->second.total;
-
-    // Admissible lower bound on ANY tree's total for S: every word costs >=1
-    // (the guess here), and at most one word per non-solved bucket can be a
-    // depth-1 hit, the rest cost >=2 — but cheaply, n + (n-1) is a valid floor
-    // (>=1 word needs a 2nd guess). If even that can't beat `bound`, give up.
-    if (n + (n - 1) >= bound) return MIN_TOTAL_INFEASIBLE;
+    // Structural floor: every word pays for this guess (n), and at least one
+    // word needs a 2nd guess → 2n-1. The memo may hold a tighter proven floor.
+    int set_lower = 2 * n - 1;
+    if (auto it = tot_memo_.find(key); it != tot_memo_.end()) {
+        const TotEntry& e = it->second;
+        if (e.total < MIN_TOTAL_INFEASIBLE) return e.total;  // exact, reuse
+        if (e.lower > set_lower) set_lower = e.lower;         // tighter floor
+    }
+    // If even the proven floor can't beat the caller's bound, give up — but
+    // record the floor so callers/siblings reuse it.
+    if (set_lower >= bound) {
+        auto& e = tot_memo_[key];
+        e.total = MIN_TOTAL_INFEASIBLE;
+        e.guess = WordList::NPOS;
+        if (set_lower > e.lower) e.lower = set_lower;
+        return MIN_TOTAL_INFEASIBLE;
+    }
 
     // Order guesses by their admissible LOWER BOUND ascending. The LB directly
     // bounds the objective (2|b|-1 per non-solved bucket), so the lowest-LB
@@ -555,29 +565,32 @@ int EntropySolver::min_total(std::span<const WordIndex> candidates, int depth,
 
         auto buckets = partition(candidates, gi, patterns_);
 
-        // Recompute the exact per-guess lower bound from the materialised
-        // partition (same value as glb; cheap, and gives us the bucket list).
-        struct Sub { Pattern p; int sz; };
+        // Build this guess's non-solved bucket list with a TIGHTENED per-bucket
+        // floor: max(2k-1, cached_lower(bucket)). Using the memoised lower bound
+        // of each child subset (instead of the crude 2k-1) is the key
+        // large-bucket accelerator — once a child has been partly explored its
+        // proven floor is far tighter, pruning sibling guesses without recursion.
+        struct Sub { Pattern p; int sz; int floor; };
         std::vector<Sub> subs;
         subs.reserve(64);
-        int lb = n;
+        int lb = n;                                  // n: everyone pays this guess
         for (Pattern p = 0; p < PATTERN_COUNT; ++p) {
             if (p == PATTERN_SOLVED) continue;
             const int sz = static_cast<int>(buckets[p].size());
             if (sz == 0) continue;
-            if (sz == 1) { lb += 1; continue; }   // singleton: exact cost 1
-            lb += 2 * sz - 1;                       // admissible floor for |b|>=2
-            subs.push_back({p, sz});
+            if (sz == 1) { lb += 1; continue; }       // singleton: exact cost 1
+            const int fl = cached_lower(buckets[p], depth - 1);
+            lb += fl;
+            subs.push_back({p, sz, fl});
         }
-        if (lb >= best) continue;                   // LB prune (no recursion)
+        if (lb >= best) continue;                     // LB prune (no recursion)
 
-        // Process buckets in ascending size order: small ones resolve quickly
-        // and raise the running total fast, so the αβ cutoff fires earlier on
-        // the expensive large buckets. We also keep a running lower bound on the
-        // *unprocessed* buckets so the cutoff is as tight as possible.
-        std::ranges::sort(subs, [](const Sub& a, const Sub& b){ return a.sz < b.sz; });
-        int rem_lb = 0;                             // Σ (2|b|-1) over subs
-        for (auto& s : subs) rem_lb += 2 * s.sz - 1;
+        // Process buckets cheapest-floor first so the running total climbs fast
+        // and the αβ cutoff fires before the expensive large buckets. Keep a
+        // running floor of the *unprocessed* buckets for the tightest cutoff.
+        std::ranges::sort(subs, [](const Sub& a, const Sub& b){ return a.floor < b.floor; });
+        int rem_lb = 0;
+        for (auto& s : subs) rem_lb += s.floor;
 
         int total = n;
         for (Pattern p = 0; p < PATTERN_COUNT; ++p) {
@@ -587,11 +600,13 @@ int EntropySolver::min_total(std::span<const WordIndex> candidates, int depth,
 
         bool feasible = true;
         for (auto& s : subs) {
-            rem_lb -= 2 * s.sz - 1;                  // this bucket leaves the LB
-            // αβ with remaining lower bound: if even the optimistic floor for
-            // this + later buckets can't beat `best`, give up on this guess.
-            if (total + (2 * s.sz - 1) + rem_lb >= best) { feasible = false; break; }
-            const int sub = min_total(buckets[s.p], depth - 1, MIN_TOTAL_INFEASIBLE);
+            rem_lb -= s.floor;                         // this bucket leaves the LB
+            // αβ: if even this bucket's floor + the rest can't beat best, stop.
+            if (total + s.floor + rem_lb >= best) { feasible = false; break; }
+            // Pass a tight child bound: the most this child may cost and still
+            // let the whole guess beat `best`. min_total uses it for its own αβ.
+            const int child_bound = best - (total + rem_lb);
+            const int sub = min_total(buckets[s.p], depth - 1, child_bound);
             if (sub >= MIN_TOTAL_INFEASIBLE) { feasible = false; break; }
             total += sub;
             if (total + rem_lb >= best) { feasible = false; break; }  // αβ cutoff
@@ -599,14 +614,40 @@ int EntropySolver::min_total(std::span<const WordIndex> candidates, int depth,
         if (feasible && total < best) { best = total; best_gi = gi; }
     }
 
-    const int result = (best_gi == WordList::NPOS) ? MIN_TOTAL_INFEASIBLE : best;
-    // Only cache EXACT results: if we were called with an external bound that
-    // pruned everything, `best` may be that bound (not the true minimum), so we
-    // must not memoise an infeasible/poisoned value. When bound==INFEASIBLE the
-    // search was unbounded and the result is exact.
-    if (bound >= MIN_TOTAL_INFEASIBLE)
-        tot_memo_[key] = {result, best_gi};
-    return result;
+    // Record the outcome. Two cases:
+    //  • best_gi != NPOS and we searched unbounded (bound==INFEASIBLE): `best`
+    //    is the EXACT optimum — store it as both total and lower.
+    //  • otherwise we only proved a lower bound (the search may have been αβ-
+    //    pruned by an external bound, or nothing beat the incumbent): store the
+    //    floor as `lower` (never poison `total`). `best` itself is a valid lower
+    //    bound when nothing beat it, since every guess's LB was >= best.
+    auto& e = tot_memo_[key];
+    if (best_gi != WordList::NPOS && bound >= MIN_TOTAL_INFEASIBLE) {
+        e.total = best;
+        e.guess = best_gi;
+        if (best > e.lower) e.lower = best;
+        return best;
+    }
+    // Inexact: tighten the stored lower bound. If no guess beat the incoming
+    // bound, `best` (== bound) is a proven floor; otherwise keep set_lower.
+    const int proven = std::max(set_lower, (best_gi == WordList::NPOS) ? bound : set_lower);
+    if (proven > e.lower) e.lower = proven;
+    if (e.total >= MIN_TOTAL_INFEASIBLE) e.total = MIN_TOTAL_INFEASIBLE;
+    return MIN_TOTAL_INFEASIBLE;
+}
+
+// Best known admissible lower bound on min_total(b, depth).
+int EntropySolver::cached_lower(std::span<const WordIndex> b, int depth) const {
+    const int k = static_cast<int>(b.size());
+    if (k <= 1) return k;                 // 0→0, 1→1 (direct hit)
+    int lo = 2 * k - 1;                   // structural floor
+    const std::uint64_t key = feas_hash(b, depth) ^ 0x6D7E'A11Cull;
+    if (auto it = tot_memo_.find(key); it != tot_memo_.end()) {
+        const TotEntry& e = it->second;
+        const int cand = (e.total < MIN_TOTAL_INFEASIBLE) ? e.total : e.lower;
+        if (cand > lo) lo = cand;
+    }
+    return lo;
 }
 
 WordIndex EntropySolver::optimal_guess(std::span<const WordIndex> candidates,
