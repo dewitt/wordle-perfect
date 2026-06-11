@@ -227,6 +227,19 @@ public:
     [[nodiscard]] int greedy_total(std::span<const WordIndex> candidates,
                                    int depth) const { return feasible_total(candidates, depth); }
 
+    // Admissible lower bound on min_total(S) if `gi` is used as the first guess:
+    //   n + Σ_buckets max(2|b|-1, val-floor(b)).
+    // Cheap (one partition + per-bucket val floors); used to rank/prune openers
+    // in an exact opener sweep without running the full search. Lower = more
+    // promising. Returns INFEASIBLE if `gi` makes no progress.
+    [[nodiscard]] int opener_lower_bound(std::span<const WordIndex> candidates,
+                                         WordIndex gi, int depth) const;
+    // Exact min_total for the tree rooted at first guess `gi` (= n + Σ
+    // min_total(bucket, depth-1)), with an optional incumbent `bound` for αβ.
+    [[nodiscard]] int opener_total(std::span<const WordIndex> candidates,
+                                   WordIndex gi, int depth,
+                                   int bound = MIN_TOTAL_INFEASIBLE) const;
+
     // Solve for a known target word, returning the full step sequence.
     // answer_idx must be a valid index into the WordList.
     // max_rounds caps the search; defaults to DEFAULT_MAX_ROUNDS (6).

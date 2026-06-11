@@ -735,6 +735,37 @@ int EntropySolver::cached_lower(std::span<const WordIndex> b, int depth) const {
     return lo;
 }
 
+int EntropySolver::opener_lower_bound(std::span<const WordIndex> candidates,
+                                      WordIndex gi, int depth) const {
+    // CHEAP ranking bound: one histogram pass (Selby val() floor over the
+    // opener's own partition). No per-bucket recursion / val-floor scan — this
+    // is called for all ~15k openers, so it must stay O(k). The tighter
+    // cached_lower / val-floor pruning kicks in inside the per-opener search.
+    const auto [lb, mb] = guess_lower_bound(patterns_, candidates, gi);
+    const int n = static_cast<int>(candidates.size());
+    if (mb == n) return MIN_TOTAL_INFEASIBLE;   // no progress
+    (void)depth;
+    return lb;
+}
+
+int EntropySolver::opener_total(std::span<const WordIndex> candidates,
+                                WordIndex gi, int depth, int bound) const {
+    const int n = static_cast<int>(candidates.size());
+    auto buckets = partition(candidates, gi, patterns_);
+    long total = n;
+    for (Pattern p = 0; p < PATTERN_COUNT; ++p) {
+        if (p == PATTERN_SOLVED || buckets[p].empty()) continue;
+        const int sub = (buckets[p].size() == 1)
+            ? 1 : min_total(buckets[p], depth - 1,
+                            bound >= MIN_TOTAL_INFEASIBLE ? MIN_TOTAL_INFEASIBLE
+                                   : static_cast<int>(bound - total));
+        if (sub >= MIN_TOTAL_INFEASIBLE) return MIN_TOTAL_INFEASIBLE;
+        total += sub;
+        if (total >= bound) return MIN_TOTAL_INFEASIBLE;  // αβ: can't beat incumbent
+    }
+    return static_cast<int>(total);
+}
+
 WordIndex EntropySolver::optimal_guess(std::span<const WordIndex> candidates,
                                        int depth) const {
     const int n = static_cast<int>(candidates.size());

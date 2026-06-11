@@ -13,12 +13,15 @@
 #include "solver.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <functional>
 #include <cstdint>
+#include <mutex>
 #include <print>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 using namespace wp;
@@ -29,11 +32,15 @@ int main(int argc, char** argv) {
     std::string start;
     int max_depth = 5;
     bool probe = false;
+    bool sweep = false;       // exact opener sweep across a ranked shortlist
+    int  sweep_top = 0;       // 0 = all openers; else cap to top-N by lower bound
+    unsigned jobs = std::thread::hardware_concurrency();
     int verify = 0;  // if >0, cross-check min_total vs brute force on first N answers
     std::string worst_bucket;  // if set, isolate+solve the single largest bucket of this opener
     std::vector<std::string_view> a(argv + 1, argv + argc);
     for (std::size_t i = 0; i < a.size(); ++i) {
         if (a[i] == "--probe-buckets") probe = true;
+        if (a[i] == "--sweep") sweep = true;
         if (i + 1 >= a.size()) continue;
         if (a[i] == "--words") words_path = a[i + 1];
         if (a[i] == "--answers") answers_path = a[i + 1];
@@ -41,7 +48,10 @@ int main(int argc, char** argv) {
         if (a[i] == "--max-depth") max_depth = std::stoi(std::string(a[i + 1]));
         if (a[i] == "--verify") verify = std::stoi(std::string(a[i + 1]));
         if (a[i] == "--worst-bucket") worst_bucket = a[i + 1];
+        if (a[i] == "--top") sweep_top = std::stoi(std::string(a[i + 1]));
+        if (a[i] == "--jobs") jobs = static_cast<unsigned>(std::stoi(std::string(a[i + 1])));
     }
+    if (jobs == 0) jobs = 1;
 
     auto wl = WordList::load(words_path);
     if (!wl) { std::println(stderr, "{}", wl.error()); return 1; }
@@ -61,6 +71,72 @@ int main(int argc, char** argv) {
     }
     std::ranges::sort(cand);
     const int n = static_cast<int>(cand.size());
+
+    if (sweep) {
+        // Exact opener sweep: rank every opener by its cheap admissible lower
+        // bound (opener_lower_bound), then run exact opener_total in parallel,
+        // best-first, with a shared atomic incumbent so weak openers are pruned
+        // (skipped if their LB can't beat the best total found).
+        const auto sw0 = Clock::now();
+        std::println("ranking {} openers by lower bound...", wl->size());
+        std::vector<std::pair<int, WordIndex>> ranked;  // (lb, gi)
+        ranked.reserve(wl->size());
+        for (std::size_t g = 0; g < wl->size(); ++g) {
+            const auto gi = static_cast<WordIndex>(g);
+            const int lb = solver.opener_lower_bound(cand, gi, max_depth);
+            if (lb < EntropySolver::MIN_TOTAL_INFEASIBLE) ranked.emplace_back(lb, gi);
+        }
+        std::ranges::sort(ranked, [](auto& x, auto& y){
+            if (x.first != y.first) return x.first < y.first;
+            return x.second < y.second;
+        });
+        if (sweep_top > 0 && static_cast<int>(ranked.size()) > sweep_top)
+            ranked.resize(sweep_top);
+        std::println("  {} openers make progress; best LB={} ({}); sweeping with {} threads",
+            ranked.size(), ranked.empty() ? -1 : ranked.front().first,
+            ranked.empty() ? "-" : std::string((*wl)[ranked.front().second].view()), jobs);
+        std::fflush(stdout);
+
+        std::atomic<int> best_total{EntropySolver::MIN_TOTAL_INFEASIBLE};
+        std::atomic<WordIndex> best_root{WordList::NPOS};
+        std::atomic<std::size_t> next{0};
+        std::mutex log_mu;
+        auto worker = [&]{
+            EntropySolver local{*wl, pm};   // private memo per thread
+            for (;;) {
+                const std::size_t i = next.fetch_add(1, std::memory_order_relaxed);
+                if (i >= ranked.size()) break;
+                const auto [lb, gi] = ranked[i];
+                const int incumbent = best_total.load(std::memory_order_relaxed);
+                if (lb >= incumbent) continue;        // LB prune: can't beat best
+                const int t = local.opener_total(cand, gi, max_depth, incumbent);
+                if (t < EntropySolver::MIN_TOTAL_INFEASIBLE) {
+                    int prev = best_total.load(std::memory_order_relaxed);
+                    while (t < prev &&
+                           !best_total.compare_exchange_weak(prev, t,
+                               std::memory_order_relaxed)) {}
+                    if (t < prev) {
+                        best_root.store(gi, std::memory_order_relaxed);
+                        std::lock_guard lk(log_mu);
+                        std::println("  new best: {} total={} mean={:.4f}",
+                            (*wl)[gi].view(), t, double(t) / n);
+                        std::fflush(stdout);
+                    }
+                }
+            }
+        };
+        std::vector<std::thread> pool;
+        for (unsigned t = 0; t < jobs; ++t) pool.emplace_back(worker);
+        for (auto& th : pool) th.join();
+
+        const int bt = best_total.load();
+        const WordIndex br = best_root.load();
+        std::println("SWEEP DONE: best opener={} total={} mean={:.4f}  ({:.1f}s)",
+            br == WordList::NPOS ? "-" : std::string((*wl)[br].view()),
+            bt, double(bt) / n,
+            std::chrono::duration<double>(Clock::now() - sw0).count());
+        return 0;
+    }
 
     if (!worst_bucket.empty()) {
         // Isolate the single largest non-trivial bucket of `worst_bucket` and
