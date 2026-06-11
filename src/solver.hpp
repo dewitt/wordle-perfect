@@ -277,6 +277,10 @@ private:
         int       lower = 0;
         int       total = std::numeric_limits<int>::max();  // INFEASIBLE = unsolved
         WordIndex guess = WordList::NPOS;
+        // The exact candidate set this entry describes, so a 64-bit hash
+        // collision can be detected (different set, same key) and rejected
+        // rather than silently corrupting the optimal total.
+        std::vector<WordIndex> set;
     };
     mutable std::unordered_map<std::uint64_t, TotEntry> tot_memo_;
     // Optional cross-instance feasibility cache (set via set_feasibility_cache);

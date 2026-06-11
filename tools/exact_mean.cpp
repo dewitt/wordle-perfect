@@ -124,7 +124,21 @@ int main(int argc, char** argv) {
             std::println("bucket sizes: {}", sizes);
             std::fflush(stdout);
         }
-        int run = n;  // n for the opener + 1 per singleton handled implicitly
+        // Account for EVERY word's depth, matching min_total's convention:
+        //   • opener guess: 1 per word                              → +n
+        //   • SOLVED bucket (opener == answer): already covered by the +n
+        //   • singleton bucket: the word is determined but still needs one more
+        //     guess to enter it → cost 2 → +1 beyond the +n already counted
+        //   • non-trivial bucket: + min_total(bucket, depth-1)
+        // The earlier version skipped the singleton +1, under-counting the total
+        // by exactly the number of singleton buckets.
+        int run = n;
+        int singletons = 0;
+        for (Pattern p = 0; p < PATTERN_COUNT; ++p) {
+            if (p == PATTERN_SOLVED) continue;
+            if (buckets[p].size() == 1) ++singletons;
+        }
+        run += singletons;  // each singleton word needs a 2nd guess
         for (auto& [sz, p] : order) {
             auto bt0 = Clock::now();
             int sub = solver.min_total(buckets[p], max_depth - 1);
@@ -134,8 +148,8 @@ int main(int argc, char** argv) {
             std::fflush(stdout);
             run += sub;
         }
-        std::println("probe done: opener {} total={} mean={:.4f}",
-            start, run, double(run) / n);
+        std::println("probe done: opener {} singletons={} total={} mean={:.4f}",
+            start, singletons, run, double(run) / n);
         return 0;
     }
 

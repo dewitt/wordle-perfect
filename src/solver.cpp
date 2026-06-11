@@ -504,15 +504,29 @@ int EntropySolver::min_total(std::span<const WordIndex> candidates, int depth,
     int set_lower = 2 * n - 1;
     if (auto it = tot_memo_.find(key); it != tot_memo_.end()) {
         const TotEntry& e = it->second;
-        if (e.total < MIN_TOTAL_INFEASIBLE) return e.total;  // exact, reuse
-        if (e.lower > set_lower) set_lower = e.lower;         // tighter floor
+        // Verify the stored set actually equals `candidates` (guard against a
+        // 64-bit hash collision silently returning another set's value).
+        const bool same = std::ranges::equal(e.set, candidates);
+        if (same) {
+            if (e.total < MIN_TOTAL_INFEASIBLE) return e.total;  // exact, reuse
+            if (e.lower > set_lower) set_lower = e.lower;         // tighter floor
+        }
     }
+    // Get the memo slot for THIS set, resetting it if the key currently holds a
+    // colliding (different) set. Returns a reference owned by our set.
+    auto slot_for = [&]() -> TotEntry& {
+        auto& e = tot_memo_[key];
+        if (!std::ranges::equal(e.set, candidates)) {
+            e = TotEntry{};
+            e.set.assign(candidates.begin(), candidates.end());
+        }
+        return e;
+    };
+
     // If even the proven floor can't beat the caller's bound, give up — but
     // record the floor so callers/siblings reuse it.
     if (set_lower >= bound) {
-        auto& e = tot_memo_[key];
-        e.total = MIN_TOTAL_INFEASIBLE;
-        e.guess = WordList::NPOS;
+        TotEntry& e = slot_for();
         if (set_lower > e.lower) e.lower = set_lower;
         return MIN_TOTAL_INFEASIBLE;
     }
@@ -631,7 +645,7 @@ int EntropySolver::min_total(std::span<const WordIndex> candidates, int depth,
     //  • If best == bound (nothing beat it), the true optimum is >= bound. We
     //    learned a proven lower bound of `bound`; record it but report INFEASIBLE
     //    (meaning "> the bound you gave me"). Never poison `total`.
-    auto& e = tot_memo_[key];
+    TotEntry& e = slot_for();
     if (best < bound) {                 // strictly improved ⇒ exact optimum
         e.total = best;
         e.guess = best_gi;
@@ -651,8 +665,10 @@ int EntropySolver::cached_lower(std::span<const WordIndex> b, int depth) const {
     const std::uint64_t key = feas_hash(b, depth) ^ 0x6D7E'A11Cull;
     if (auto it = tot_memo_.find(key); it != tot_memo_.end()) {
         const TotEntry& e = it->second;
-        const int cand = (e.total < MIN_TOTAL_INFEASIBLE) ? e.total : e.lower;
-        if (cand > lo) lo = cand;
+        if (std::ranges::equal(e.set, b)) {   // ignore on hash collision
+            const int cand = (e.total < MIN_TOTAL_INFEASIBLE) ? e.total : e.lower;
+            if (cand > lo) lo = cand;
+        }
     }
     return lo;
 }
@@ -662,7 +678,9 @@ WordIndex EntropySolver::optimal_guess(std::span<const WordIndex> candidates,
     const int n = static_cast<int>(candidates.size());
     if (n == 1) return candidates[0];
     const std::uint64_t key = feas_hash(candidates, depth) ^ 0x6D7E'A11Cull;
-    if (auto it = tot_memo_.find(key); it != tot_memo_.end()) return it->second.guess;
+    if (auto it = tot_memo_.find(key); it != tot_memo_.end() &&
+        std::ranges::equal(it->second.set, candidates))
+        return it->second.guess;
     return WordList::NPOS;
 }
 
