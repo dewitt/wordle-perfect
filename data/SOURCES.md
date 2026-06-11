@@ -12,12 +12,22 @@
 
 ## answers.txt — curated answer list (evaluation holdback set)
 
-- **Count**: 2,314 five-letter words
-- **Source**: cfreshman's Wordle answers gist (original Josh Wardle answer list)
+- **Count**: 2,355 five-letter words
+- **Source**: cfreshman's Wordle answers gist (original Josh Wardle answer list,
+  2,315 words) + 40 post-acquisition NYT additions
   - URL: https://gist.github.com/cfreshman/a03ef2cba789d8cf00c08f767e0fad7b
 - **Retrieved**: 2026-06-07
 - **Format**: Plain text, one word per line, lowercase, alphabetically sorted
-- **Notes**: This is the original Wardle answer list (pre-NYT). NYT has since removed ~7 words (SLAVE, FETUS, FIBRE, etc.) and added ~40 new words. The original list remains the best widely-validated baseline for evaluation. NYT began recycling answers on 2026-02-02, making the curated list a moving target. `answers.txt` is used here **only as an evaluation/hillclimbing holdback set**, not as the solution space — `words.txt` defines the full solution space.
+- **Provenance arithmetic**: cfreshman base = 2,315 words; we added exactly **40**
+  post-acquisition NYT answers (0 removals) → **2,355**. For reference, relative
+  to Alex Selby's `wordlist_nyt20220830_hidden` (2,309 words, a strict subset of
+  ours) we have **+46** words (2,355 = 2,309 + 46).
+- **Notes**: This builds on the original Wardle answer list (pre-NYT). NYT has
+  added new answers since acquisition; we apply the 40 additions but no removals,
+  keeping the list a superset for evaluation. NYT began recycling answers on
+  2026-02-02, making the curated list a moving target. `answers.txt` is used here
+  **only as an evaluation/hillclimbing holdback set**, not as the solution space —
+  `words.txt` defines the full solution space.
 
 ## Design rationale
 
