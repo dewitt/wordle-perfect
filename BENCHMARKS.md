@@ -152,24 +152,45 @@ forced-opener and full `min_total(set)` paths were unaffected.
 
 ### Lowest known mean by opener (our 2355-answer / 14855-guess list, worst≤5)
 
-Computed via the (correct) forced-opener path `exact_mean --start W`:
+Found by the exact parallel opener sweep (`exact_mean --sweep --top 50`,
+8 threads, 776 s on an M2): rank all openers by a cheap val()-floor lower bound,
+then run the exact per-opener search best-first with a shared incumbent that
+prunes openers whose floor can't beat the best total found.
 
 | Opener | Lowest mean found | Total |
 |--------|-------------------|-------|
-| **salet** | **3.4246** | 8065 |
+| **tarse** | **3.4225** | 8060 |
+| salet  | 3.4246 | 8065 |
 | reast  | 3.4251 | 8066 |
-| _(others pending re-measurement with the fixed code)_ | | |
 
 Findings:
-- On **our 2355 list**, salet (3.4246) and reast (3.4251) are essentially tied,
-  salet ahead by a single guess. (Earlier per-opener figures in this file were
-  produced by the buggy probe and under-counted by ~the singleton count; they
-  have been removed pending re-measurement.)
+- On **our 2355 list** the best opener found is **tarse** (3.4225), ahead of
+  salet (3.4246) and reast (3.4251). (This echoes Selby's finding that tarse wins
+  on the 14855-guess list, though our exact value differs because our answer set
+  has 46 more words than his.)
 - The 46 extra answer words raise reast's total from Selby's 7896 (2309) to 8066
   (2355) — ~3.7 guesses per extra word, as expected.
-- The production greedy builder ships **3.4870**; the lowest mean we've found for
-  its reast opener is **3.4251**, so ~0.062 of mean is reclaimed by an
-  exact-mean tree.
+- The production greedy builder ships **3.4870**; the lowest mean we've found
+  (tarse) is **3.4225**, so ~0.065 of mean is reclaimed by an exact-mean tree.
+
+#### What made the sweep tractable (issue #29)
+
+The exact per-opener search previously stalled on poorly-splitting endgame sets
+(tarse's size-115 `-er`/`-eed` bucket ran >150 s and never finished) because the
+`2k−1` lower bound is ~33–40 % below the true value there. Replacing it with
+Selby's **val() floor** — `lb = 3k − (#distinct response classes) − [guess∈S]`,
+computed in one histogram pass, and cached per-set via `cached_lower` — cracked it:
+
+| set | before | after |
+|-----|--------|-------|
+| tarse size-234 bucket | 17 s (9074 nodes) | 5 s (675 nodes) |
+| tarse size-115 bucket | >150 s (never) | 65 s (395k nodes) |
+| full tarse opener | >8 min (never) | 71 s |
+| reast on Selby's 2309 list (validation) | ~60–100 s | 18.6 s (still 7896/3.4197 ✓) |
+
+Remaining: a few openers that rank high on the cheap LB but split poorly still
+take minutes each, so an exhaustive all-openers sweep is slow; the top-50 (the
+realistic strong-opener shortlist) completes in ~13 min and contains the winner.
 
 ### Exact-mean DB emission (`build_db --exact-mean`)
 
