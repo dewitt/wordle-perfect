@@ -614,25 +614,32 @@ int EntropySolver::min_total(std::span<const WordIndex> candidates, int depth,
         if (feasible && total < best) { best = total; best_gi = gi; }
     }
 
-    // Record the outcome. Two cases:
-    //  • best_gi != NPOS and we searched unbounded (bound==INFEASIBLE): `best`
-    //    is the EXACT optimum — store it as both total and lower.
-    //  • otherwise we only proved a lower bound (the search may have been αβ-
-    //    pruned by an external bound, or nothing beat the incumbent): store the
-    //    floor as `lower` (never poison `total`). `best` itself is a valid lower
-    //    bound when nothing beat it, since every guess's LB was >= best.
+    // Record the outcome.
+    //
+    // `best` was initialised to the incoming `bound`. The guess loop visits
+    // EVERY guess whose admissible lower bound is < best (it breaks only once a
+    // guess — and hence all later ones in LB order — cannot beat best). So:
+    //
+    //  • If best < bound, we strictly improved on the incoming bound, which can
+    //    only happen by actually constructing a tree of total `best`. Because we
+    //    examined every guess capable of beating `best`, that value is the EXACT
+    //    minimum — store and return it. (This is true whether or not `bound` was
+    //    finite; the earlier version wrongly discarded improving results found
+    //    under a finite bound, causing parents to reject the optimal guess and
+    //    over-count the mean.)
+    //
+    //  • If best == bound (nothing beat it), the true optimum is >= bound. We
+    //    learned a proven lower bound of `bound`; record it but report INFEASIBLE
+    //    (meaning "> the bound you gave me"). Never poison `total`.
     auto& e = tot_memo_[key];
-    if (best_gi != WordList::NPOS && bound >= MIN_TOTAL_INFEASIBLE) {
+    if (best < bound) {                 // strictly improved ⇒ exact optimum
         e.total = best;
         e.guess = best_gi;
         if (best > e.lower) e.lower = best;
         return best;
     }
-    // Inexact: tighten the stored lower bound. If no guess beat the incoming
-    // bound, `best` (== bound) is a proven floor; otherwise keep set_lower.
-    const int proven = std::max(set_lower, (best_gi == WordList::NPOS) ? bound : set_lower);
-    if (proven > e.lower) e.lower = proven;
-    if (e.total >= MIN_TOTAL_INFEASIBLE) e.total = MIN_TOTAL_INFEASIBLE;
+    // Nothing beat the incoming bound: `bound` is a proven floor for this subset.
+    if (bound > e.lower) e.lower = bound;
     return MIN_TOTAL_INFEASIBLE;
 }
 

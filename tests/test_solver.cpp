@@ -287,21 +287,35 @@ TEST_CASE("best_guess_feasible - returns a feasible, splitting guess",
 // ─────────────────────────────────────────────────────────────────────────────
 
 namespace {
-// Reference: exhaustive minimal total depth (direct hit = 1), no pruning, no
-// caching. Tries EVERY word as the guess. Slow but unimpeachably correct, so it
-// is the oracle for min_total's branch-and-bound on small inputs.
+// Reference: minimal total depth (direct hit = 1). Tries EVERY word as the
+// guess. This is the independent oracle for min_total. It uses ONLY the
+// admissible 2k-1 lower bound for alpha-beta — a textbook-simple prune that
+// keeps it exact while making it fast enough for ~14-word candidate sets over
+// the full 14855-word vocabulary. Deliberately shares NO machinery with
+// min_total (no transposition table, no per-guess LB ordering, no cached
+// bounds), so agreement is a genuine cross-check.
 int brute_min_total(const WordList& wl, const PatternMatrix& pm,
-                    std::span<const WordIndex> cand, int depth) {
+                    std::span<const WordIndex> cand, int depth,
+                    int bound = EntropySolver::MIN_TOTAL_INFEASIBLE) {
     const int n = static_cast<int>(cand.size());
     if (n == 0) return 0;
     if (n == 1) return 1;
     if (depth <= 1) return EntropySolver::MIN_TOTAL_INFEASIBLE;
+    if (2 * n - 1 >= bound) return EntropySolver::MIN_TOTAL_INFEASIBLE;
 
-    int best = EntropySolver::MIN_TOTAL_INFEASIBLE;
+    int best = bound;
     for (WordIndex gi = 0; gi < static_cast<WordIndex>(wl.size()); ++gi) {
         auto buckets = EntropySolver::partition(cand, gi, pm);
         if (buckets[PATTERN_SOLVED].size() == static_cast<std::size_t>(n))
             continue;  // no progress (only happens if all map to one pattern)
+        // Admissible floor for this guess: n + Σ_{|b|>=2}(2|b|-1).
+        long floor = n;
+        for (Pattern p = 0; p < PATTERN_COUNT; ++p) {
+            if (p == PATTERN_SOLVED) continue;
+            const long sz = static_cast<long>(buckets[p].size());
+            if (sz >= 2) floor += 2 * sz - 1; else floor += sz;  // singleton: 1
+        }
+        if (floor >= best) continue;
         bool feasible = true;
         long total = n;  // everyone pays for this guess
         for (Pattern p = 0; p < PATTERN_COUNT && feasible; ++p) {
@@ -310,10 +324,11 @@ int brute_min_total(const WordList& wl, const PatternMatrix& pm,
                         ? 1 : brute_min_total(wl, pm, buckets[p], depth - 1);
             if (sub >= EntropySolver::MIN_TOTAL_INFEASIBLE) { feasible = false; break; }
             total += sub;
+            if (total >= best) { feasible = false; break; }
         }
         if (feasible && total < best) best = static_cast<int>(total);
     }
-    return best;
+    return (best < bound) ? best : EntropySolver::MIN_TOTAL_INFEASIBLE;
 }
 }  // namespace
 
@@ -335,6 +350,34 @@ TEST_CASE("min_total - matches brute force on a small word list", "[solver][exac
         INFO("depth=" << depth);
         CHECK(got == oracle);
     }
+}
+
+TEST_CASE("min_total - matches brute force with the full guess vocabulary",
+          "[solver][exact][slow]") {
+    // Regression for the bounded-call bug: with the full 14855-word guess
+    // vocabulary, the recursion calls min_total with FINITE child bounds. A
+    // mid-sized candidate set forces deep recursion (depth 3-4) where an
+    // improving tree found under a finite bound must still be returned (not
+    // discarded). The brute-force oracle (no bounds, no caching) is the truth.
+    auto wl = WordList::load("data/words.txt");
+    REQUIRE(wl.has_value());
+    auto pm = PatternMatrix::build(*wl);
+    EntropySolver solver{*wl, pm};
+
+    // A modest candidate set forces depth-3 recursion with finite child bounds
+    // while keeping the exhaustive oracle (14855 guesses, no pruning) tractable.
+    auto ans = WordList::load("data/answers.txt");
+    REQUIRE(ans.has_value());
+    std::vector<WordIndex> cand;
+    for (auto& w : ans->span() | std::views::take(14)) {
+        auto idx = wl->index_of(w.view());
+        if (idx != WordList::NPOS) cand.push_back(idx);
+    }
+    std::ranges::sort(cand);
+
+    const int got    = solver.min_total(cand, 5);
+    const int oracle = brute_min_total(*wl, pm, cand, 5);
+    CHECK(got == oracle);
 }
 
 TEST_CASE("min_total - recovers optimal guess and is <= greedy", "[solver][exact]") {
