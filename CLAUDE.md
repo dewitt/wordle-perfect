@@ -27,11 +27,12 @@ A Wordle solver that precomputes the best-known decision tree over all valid Wor
 - [x] Dynamic solver — answer-weighted entropy-greedy (`EntropySolver`, `solver.cpp`)
 - [x] **Worst-case-5 tree (issues #8, #27)** — `EntropySolver::is_feasible`/`best_guess_feasible`: DFS minimax (memoized on the candidate set) proves the answer set is solvable in worst-case 5 (the proven optimum; 4 is impossible); a feasibility-constrained entropy-greedy policy + `--lookahead` then minimises the mean (heuristic, not proven optimal). A **parallel opener sweep** (per-thread `EntropySolver`, atomic work-stealing, 3–5× multi-core) picks the lowest-mean opener → reast, worst-5, **mean 3.4870**, verified by the built-in evaluate().
  - [x] **Metal GPU node-scoring (issue #12)** — `src/gpu_score.{hpp,mm}`: a compute shader scores all ~15k guesses (max_bucket + entropy) in one dispatch. Transposed-matrix (coalesced) layout → **14.8×** vs CPU (15.7× on the full list), verified identical. `tools/gpu_bench` benchmarks/verifies. Gated by `WP_HAVE_METAL`; non-Apple builds unaffected.
- - [x] Single precomputation tool — `build_db` (worst-5 parallel feasibility sweep; `--full` for full coverage). SQLite + binary, verified by evaluate(). The earlier entropy/beam ("legacy") builder was removed — it was strictly inferior (worst-6, mean 3.8144).
+ - [x] Single precomputation tool — `build_db` (worst-5 parallel feasibility sweep; `--full` for full coverage; **`--exact-mean` for a provably minimal-mean tree**). SQLite + binary, verified by evaluate(). The earlier entropy/beam ("legacy") builder was removed — it was strictly inferior (worst-6, mean 3.8144).
+- [x] **Exact minimal-mean optimiser (issue #26)** — `EntropySolver::min_total`: branch-and-bound + transposition DP computes the provably minimal mean (worst≤5). Validated against Selby's proven optimum (reast on his 2309 list = 7896/3.4197, byte-identical to `wordle.cpp`). `build_db --exact-mean --start-word salet` emits a DB at **mean 3.4246** (vs greedy 3.4870), verified by evaluate().
 - [x] CLI tool — `wordle` binary; `solve`, `play`, `eval`, `info`, `dump` modes
 - [x] Database integrity — FNV-1a checksum on every open
 - [x] Binary DB format — flat mmap'd `.bin` (`src/binarydb.*`) for true O(1) lookup; `build_db` exports it alongside the SQLite file; CLI auto-detects format. ~42% smaller, ~2× faster, no runtime SQLite dep
-- [x] Test suite — Catch2 v3, 59 tests, `ctest` in ~4s (pattern, wordlist, solver incl. feasibility + consistency, database incl. walk_target + real-corruption + e2e, binarydb incl. SQLite-parity + dump)
+- [x] Test suite — Catch2 v3, 62 tests, `ctest` in ~7s (pattern, wordlist, solver incl. feasibility + consistency + exact `min_total` vs brute-force oracle, database incl. walk_target + real-corruption + e2e, binarydb incl. SQLite-parity + dump)
 - [x] Code quality — cached DB statements, uint16_t overflow guard, shared `walk_target`, mtime-derived words_date, mode_solve answers validation, FNV hash correctness
 - [x] Full-coverage build mode — `build_db --full` builds `wordle-full.db` covering all 14,855 guess words (worst-case depth 7, 0 failures)
 
@@ -91,14 +92,23 @@ omitted the +1-per-singleton cost (under-count). The forced-opener and full
 **Exact optimal means on our 2355-answer list (worst≤5):** salet **3.4246**
 (8065) and reast **3.4251** (8066) are essentially tied (salet ahead by 1 guess);
 other openers pending re-measurement with the fixed code. The production greedy
-ships 3.4870, so ~0.062 of mean remains for an exact-mean DB. Driver:
+ships 3.4870, so ~0.062 of mean is reclaimed by an exact-mean DB. Driver:
 `tools/exact_mean.cpp` (`--start WORD`; `--probe-buckets` for per-bucket timing,
-`--verify N` for a brute-force cross-check). Full results + method in
-`BENCHMARKS.md`. **Remaining:** wire `min_total` into `build_db` to emit an
-exact-mean tree, speed up the harder openers (e.g. tarse), and a full unforced
-opener search for the global optimum.
+`--verify N` for a brute-force cross-check, `--worst-bucket` to isolate hard
+buckets). Full results + method in `BENCHMARKS.md`.
 
-See the open GitHub issues for the remaining backlog from the code review — notably the SIMD/bitmask pattern path (#12, open) and emitting an exact-mean DB (#26, in progress on `exact-mean-bnb`). The worst-case-5 tree (#8) and the flat mmap'd binary DB (#13) are implemented.
+**`build_db --exact-mean` emits an exact-mean DB** (requires `--start-word`; runs
+`min_total` once at the root, then emits via `optimal_guess` per node). Verified
+end to end with salet: evaluate() reports **mean 3.4246, worst 5, 0 failures**
+(dist 80/1236/998/41), SQLite==binary parity, CLI solves correctly. Strategy
+label `exact-mean-worst{D}`.
+
+**Remaining:** speed up the harder openers (e.g. tarse has a pathological
+size-115 `-er`/`-eed` endgame bucket that runs >100s) so an unforced exact opener
+search for the global optimum becomes tractable; consider shipping the
+exact-mean DB as the default production artifact.
+
+See the open GitHub issues for the remaining backlog from the code review — notably the SIMD/bitmask pattern path (#12, open). The worst-case-5 tree (#8), the flat mmap'd binary DB (#13), and the exact-mean DB (#26, `build_db --exact-mean`) are implemented.
 
 ## Spec format
 
@@ -116,7 +126,8 @@ See the open GitHub issues for the remaining backlog from the code review — no
 | `src/solver.hpp/cpp` | `EntropySolver`: weighted entropy `best_guess`/`solve`; `is_feasible` (DFS minimax feasibility) + `best_guess_feasible`/`tree_total_for_opener` (worst-case-5 construction); `any_consistent_word` |
 | `src/database.hpp/cpp` | SQLite decision tree + templated `walk_target` helper + bulk `all_nodes`/`all_edges` export (read/write, checksum, metadata, cached hot-path stmts) |
 | `src/binarydb.hpp/cpp` | Flat mmap'd `.bin` decision tree (`BinaryDb`): header+checksum, direct-indexed nodes, CSR pattern-sorted edges; `export_from(Database)` + read-only mmap lookup |
-| `tools/build_db.cpp` | **The single decision-tree builder** (worst-5 parallel feasibility sweep; `--full` for full coverage). Always runs evaluate() for measured metadata; exports SQLite + binary. Flags: `--start-word`, `--lookahead` (emit refinement), `--sweep-lookahead`, `--top` (default 50; 0=all), `--jobs`, `--target-depth`, `--date`, `--binary`, `--no-binary` |
+| `tools/build_db.cpp` | **The single decision-tree builder** (worst-5 parallel feasibility sweep; `--full` for full coverage; `--exact-mean` for a provably minimal-mean tree, requires `--start-word`). Always runs evaluate() for measured metadata; exports SQLite + binary. Flags: `--start-word`, `--exact-mean`, `--lookahead` (emit refinement), `--sweep-lookahead`, `--top` (default 50; 0=all), `--jobs`, `--target-depth`, `--date`, `--binary`, `--no-binary` |
+| `tools/exact_mean.cpp` | Exact minimal-mean optimiser driver (`min_total`). `--start WORD`, `--probe-buckets`, `--verify N`, `--worst-bucket WORD`, `--answers F` |
 | `src/gpu_score.{hpp,mm}` | **Metal GPU scorer** — one-dispatch scoring of all guesses (max_bucket+entropy); transposed-matrix coalesced layout, 14.8× CPU |
 | `tools/gpu_bench.cpp` | GPU-vs-CPU scoring benchmark + parity check |
 | `src/main.cpp` | CLI entry point (`solve`, `play`, `eval`, `info`, `dump`); validates solve targets vs answers list |

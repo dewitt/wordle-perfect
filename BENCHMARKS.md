@@ -162,8 +162,25 @@ Findings:
 - The 46 extra answer words raise reast's total from Selby's 7896 (2309) to 8066
   (2355) — ~3.7 guesses per extra word, as expected.
 - The production greedy builder ships **3.4870**; the exact optimum for its reast
-  opener is **3.4251**, so there is ~0.062 of mean still on the table if we emit
-  an exact-mean tree (issue #26, remaining work).
+  opener is **3.4251**, so ~0.062 of mean is reclaimed by an exact-mean tree.
+
+### Exact-mean DB emission (`build_db --exact-mean`)
+
+`build_db --exact-mean --start-word salet` runs `min_total` once at the root
+(~116 s single-core) then emits the optimal tree via `optimal_guess` per node.
+`evaluate()` (an independent walk of the finished tree) confirms:
+
+```
+strategy=exact-mean-worst5 start=salet worst=5 mean=3.4246 nodes=2490
+distribution: 80×2  1236×3  998×4  41×5   (0 failures, 2355 solved)
+```
+
+vs the production greedy `minimax-worst5-lookahead1` (start reast, mean 3.4870).
+Both the SQLite `.db` and the flat `.bin` are emitted and verified in parity
+(CLI solves identical paths through each). The build is dominated by the
+single-core DP (sweep/emit are ~0 s); the harder openers (e.g. tarse, with a
+pathological size-115 `-er`/`-eed` bucket) are not yet fast enough to use here,
+so an unforced exact opener search remains future work.
 
 ### Raw WPMETRICS datapoints
 
