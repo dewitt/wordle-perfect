@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <functional>
 #include <cstdint>
 #include <print>
 #include <string>
@@ -26,6 +27,7 @@ int main(int argc, char** argv) {
     std::string start;
     int max_depth = 5;
     bool probe = false;
+    int verify = 0;  // if >0, cross-check min_total vs brute force on first N answers
     std::vector<std::string_view> a(argv + 1, argv + argc);
     for (std::size_t i = 0; i < a.size(); ++i) {
         if (a[i] == "--probe-buckets") probe = true;
@@ -34,6 +36,7 @@ int main(int argc, char** argv) {
         if (a[i] == "--answers") answers_path = a[i + 1];
         if (a[i] == "--start") start = a[i + 1];
         if (a[i] == "--max-depth") max_depth = std::stoi(std::string(a[i + 1]));
+        if (a[i] == "--verify") verify = std::stoi(std::string(a[i + 1]));
     }
 
     auto wl = WordList::load(words_path);
@@ -54,6 +57,49 @@ int main(int argc, char** argv) {
     }
     std::ranges::sort(cand);
     const int n = static_cast<int>(cand.size());
+
+    if (verify > 0) {
+        // Independent brute force with only the 2k-1 admissible alpha-beta —
+        // shares no machinery with min_total. Cross-check on the first N answers.
+        std::function<int(std::span<const WordIndex>, int, int)> brute =
+            [&](std::span<const WordIndex> c, int d, int bound) -> int {
+            const int m = static_cast<int>(c.size());
+            if (m == 0) return 0;
+            if (m == 1) return 1;
+            if (d <= 1) return EntropySolver::MIN_TOTAL_INFEASIBLE;
+            if (2 * m - 1 >= bound) return EntropySolver::MIN_TOTAL_INFEASIBLE;
+            int best = bound;
+            for (WordIndex gi = 0; gi < static_cast<WordIndex>(wl->size()); ++gi) {
+                auto bk = EntropySolver::partition(c, gi, pm);
+                if (bk[PATTERN_SOLVED].size() == static_cast<std::size_t>(m)) continue;
+                long fl = m;
+                for (Pattern p = 0; p < PATTERN_COUNT; ++p) {
+                    if (p == PATTERN_SOLVED) continue;
+                    const long sz = static_cast<long>(bk[p].size());
+                    fl += (sz >= 2) ? 2 * sz - 1 : sz;
+                }
+                if (fl >= best) continue;
+                bool ok = true; long tot = m;
+                for (Pattern p = 0; p < PATTERN_COUNT && ok; ++p) {
+                    if (p == PATTERN_SOLVED || bk[p].empty()) continue;
+                    int sub = (bk[p].size() == 1) ? 1 : brute(bk[p], d - 1, best - static_cast<int>(tot));
+                    if (sub >= EntropySolver::MIN_TOTAL_INFEASIBLE) { ok = false; break; }
+                    tot += sub;
+                    if (tot >= best) { ok = false; break; }
+                }
+                if (ok && tot < best) best = static_cast<int>(tot);
+            }
+            return (best < bound) ? best : EntropySolver::MIN_TOTAL_INFEASIBLE;
+        };
+        std::vector<WordIndex> sub(cand.begin(),
+            cand.begin() + std::min<std::size_t>(verify, cand.size()));
+        EntropySolver fresh{*wl, pm};
+        int mt = fresh.min_total(sub, max_depth);
+        int bf = brute(sub, max_depth, EntropySolver::MIN_TOTAL_INFEASIBLE);
+        std::println("VERIFY n={} min_total={} brute={} {}",
+            sub.size(), mt, bf, (mt == bf ? "OK" : "*** MISMATCH ***"));
+        return 0;
+    }
 
     t0 = Clock::now();
     int total = EntropySolver::MIN_TOTAL_INFEASIBLE;
