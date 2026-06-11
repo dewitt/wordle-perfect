@@ -110,48 +110,60 @@ GPU-side `score_sets`/unpack overhead.
 
 `EntropySolver::min_total` computes the **provably minimal** total/mean solve
 depth subject to the worst-case-5 cap, via branch-and-bound with a transposition
-table. After three rounds of Selby-style optimisation it is tractable on the
-full answer set with a forced opener (~60 s single-core on an M2):
+table. After several rounds of Selby-style optimisation it is tractable on the
+full answer set with a forced opener (~35–90 s single-core on an M2; harder
+openers such as tarse are slower):
 
 1. **`2|b|-1` per-guess lower bound + |H_i|-ordered partition loop** — skip a
    guess without recursion when its admissible floor can't beat the incumbent;
    process buckets small-first so αβ fires before the expensive large buckets.
 2. **LB-ordered guess iteration + whole-loop early break** — try lowest-floor
    guesses first; once a guess's floor can't beat the incumbent, every later
-   guess is skipped wholesale. (size-109 reast bucket: 3.19 s → 0.48 s.)
+   guess is skipped wholesale.
 3. **Lower-bound caching** — the memo stores a proven `lower` per subset (always,
    even when αβ-pruned); child-bucket floors use `max(2k-1, cached_lower)` and
-   each child gets a tight `child_bound`. This made the 4 largest reast buckets
-   (124/129/149/234) tractable (234 → 10.4 s) **and fixed a latent soundness bug**
-   where αβ-pruned child results were cached as exact (under-counting; e.g. the
-   size-109 reast bucket reported 288 vs the true 298). Validated against an
-   exhaustive brute-force oracle (`min_total` tests, depths 3/4/5).
+   each child gets a tight `child_bound`. The memo also stores the candidate set
+   and verifies it on read (64-bit hash-collision guard).
+
+### Validation against Selby's proven optimum
+
+Our guess list (`data/words.txt`, 14855) is **byte-for-byte identical** to Alex
+Selby's `wordlist_nyt20220830_all`. His hidden list (2309) is a strict subset of
+ours (2355 = 2309 + 46 later NYT additions). Running our optimiser on **Selby's
+exact 2309 list** reproduces his proven optima exactly:
+
+| Opener | Our `min_total` (2309 list) | Selby (proven, `wordle.cpp`) |
+|--------|-----------------------------|------------------------------|
+| reast  | 7896 / 3.4197 | 7896 / 3.4197 ✓ |
+
+(verified by compiling and running Selby's own `wordle.cpp -w reast` — 7896,
+1.1 s.) This is strong end-to-end validation that `min_total` computes the true
+optimum. It also surfaced two bugs along the way (now fixed): a soundness bug
+that discarded improving trees found under a finite recursion bound (over-count),
+and a `--probe-buckets` display bug that omitted the +1-per-singleton-bucket cost
+(under-count by the number of singletons). The forced-opener and full
+`min_total(set)` paths were always correct.
 
 ### Exact optimal mean by opener (our 2355-answer / 14855-guess list, worst≤5)
 
+Computed via the (correct) forced-opener path `exact_mean --start W`:
+
 | Opener | Exact optimal mean | Total |
 |--------|--------------------|-------|
-| **reast** | **3.4671** | 8165 |
-| tarse  | 3.4739 | 8181 |
-| salet  | 3.4743 | 8182 |
-| trace  | 3.4764 | 8187 |
-| slate  | 3.4773 | 8189 |
-| crate  | 3.4807 | 8197 |
-| carse  | 3.5057 | 8256 |
-| raise  | 3.5227 | 8296 |
+| **salet** | **3.4246** | 8065 |
+| reast  | 3.4251 | 8066 |
+| _(others pending re-measurement with the fixed code)_ | | |
 
 Findings:
-- **reast is the best opener among strong candidates on our list**, at an exact
-  optimal mean of **3.4671** — only 0.0199 below the greedy builder's 3.4870, so
-  the production tree is already very close to opener-optimal for reast.
-- This **differs from Selby's published result** (TARSE 3.4140 wins on the
-  14855-guess list) because our answer set has **2355** words — the 40
-  post-acquisition NYT additions over Selby's 2315 shift both the optimal opener
-  and the achievable mean upward. On our set tarse (3.4739) is mid-pack.
-- These means are computed per *forced* opener. A full unforced opener search
-  (`min_total(full_set, 5)`) would prove the global optimum but is much more
-  expensive; the forced-opener probe over strong candidates is the practical
-  route and reast already dominates them.
+- On **our 2355 list**, salet (3.4246) and reast (3.4251) are essentially tied,
+  salet ahead by a single guess. (Earlier per-opener figures in this file were
+  produced by the buggy probe and under-counted by ~the singleton count; they
+  have been removed pending re-measurement.)
+- The 46 extra answer words raise reast's total from Selby's 7896 (2309) to 8066
+  (2355) — ~3.7 guesses per extra word, as expected.
+- The production greedy builder ships **3.4870**; the exact optimum for its reast
+  opener is **3.4251**, so there is ~0.062 of mean still on the table if we emit
+  an exact-mean tree (issue #26, remaining work).
 
 ### Raw WPMETRICS datapoints
 
