@@ -484,10 +484,12 @@ int EntropySolver::tree_total_for_opener(std::span<const WordIndex> candidates,
     return total;
 }
 
-// ── Exact mean optimisation: min_total / optimal_guess ──────────────────────
+// ── Lowest-mean search: min_total / optimal_guess ───────────────────────────
 //
-// min_total(S, depth): minimal Σ-depth (direct hit = 1) over trees with
-// worst-case <= depth. Branch-and-bound with transposition (sorted-set memo).
+// min_total(S, depth): the lowest Σ-depth (direct hit = 1) this search finds
+// over trees with worst-case <= depth. Exhaustive branch-and-bound with
+// transposition (sorted-set memo). The result is best-known, not a verified
+// global optimum (see the header comment and BENCHMARKS.md).
 int EntropySolver::min_total(std::span<const WordIndex> candidates, int depth,
                              int bound) const {
     const int n = static_cast<int>(candidates.size());
@@ -497,10 +499,10 @@ int EntropySolver::min_total(std::span<const WordIndex> candidates, int depth,
     // Admissible: depth-2 can split into at most 243 singleton buckets.
     if (depth == 2 && n > PATTERN_COUNT) return MIN_TOTAL_INFEASIBLE;
 
-    // (c) Transposition: exact value of S at `depth` is order-independent.
+    // (c) Transposition: the searched value of S at `depth` is order-independent.
     const std::uint64_t key = feas_hash(candidates, depth) ^ 0x6D7E'A11Cull;
     // Structural floor: every word pays for this guess (n), and at least one
-    // word needs a 2nd guess → 2n-1. The memo may hold a tighter proven floor.
+    // word needs a 2nd guess → 2n-1. The memo may hold a tighter known floor.
     int set_lower = 2 * n - 1;
     if (auto it = tot_memo_.find(key); it != tot_memo_.end()) {
         const TotEntry& e = it->second;
@@ -508,7 +510,7 @@ int EntropySolver::min_total(std::span<const WordIndex> candidates, int depth,
         // 64-bit hash collision silently returning another set's value).
         const bool same = std::ranges::equal(e.set, candidates);
         if (same) {
-            if (e.total < MIN_TOTAL_INFEASIBLE) return e.total;  // exact, reuse
+            if (e.total < MIN_TOTAL_INFEASIBLE) return e.total;  // fully searched, reuse
             if (e.lower > set_lower) set_lower = e.lower;         // tighter floor
         }
     }
@@ -523,7 +525,7 @@ int EntropySolver::min_total(std::span<const WordIndex> candidates, int depth,
         return e;
     };
 
-    // If even the proven floor can't beat the caller's bound, give up — but
+    // If even the known floor can't beat the caller's bound, give up — but
     // record the floor so callers/siblings reuse it.
     if (set_lower >= bound) {
         TotEntry& e = slot_for();
@@ -583,7 +585,7 @@ int EntropySolver::min_total(std::span<const WordIndex> candidates, int depth,
         // floor: max(2k-1, cached_lower(bucket)). Using the memoised lower bound
         // of each child subset (instead of the crude 2k-1) is the key
         // large-bucket accelerator — once a child has been partly explored its
-        // proven floor is far tighter, pruning sibling guesses without recursion.
+        // known floor is far tighter, pruning sibling guesses without recursion.
         struct Sub { Pattern p; int sz; int floor; };
         std::vector<Sub> subs;
         subs.reserve(64);
@@ -636,23 +638,23 @@ int EntropySolver::min_total(std::span<const WordIndex> candidates, int depth,
     //
     //  • If best < bound, we strictly improved on the incoming bound, which can
     //    only happen by actually constructing a tree of total `best`. Because we
-    //    examined every guess capable of beating `best`, that value is the EXACT
-    //    minimum — store and return it. (This is true whether or not `bound` was
-    //    finite; the earlier version wrongly discarded improving results found
-    //    under a finite bound, causing parents to reject the optimal guess and
-    //    over-count the mean.)
+    //    examined every guess capable of beating `best`, that value is the
+    //    minimum over this search — store and return it. (This is true whether or
+    //    not `bound` was finite; the earlier version wrongly discarded improving
+    //    results found under a finite bound, causing parents to reject the best
+    //    guess and over-count the mean.)
     //
-    //  • If best == bound (nothing beat it), the true optimum is >= bound. We
-    //    learned a proven lower bound of `bound`; record it but report INFEASIBLE
+    //  • If best == bound (nothing beat it), the searched minimum is >= bound. We
+    //    learned a sound lower bound of `bound`; record it but report INFEASIBLE
     //    (meaning "> the bound you gave me"). Never poison `total`.
     TotEntry& e = slot_for();
-    if (best < bound) {                 // strictly improved ⇒ exact optimum
+    if (best < bound) {                 // strictly improved ⇒ searched minimum
         e.total = best;
         e.guess = best_gi;
         if (best > e.lower) e.lower = best;
         return best;
     }
-    // Nothing beat the incoming bound: `bound` is a proven floor for this subset.
+    // Nothing beat the incoming bound: `bound` is a sound floor for this subset.
     if (bound > e.lower) e.lower = bound;
     return MIN_TOTAL_INFEASIBLE;
 }

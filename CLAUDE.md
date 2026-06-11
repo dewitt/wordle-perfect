@@ -25,10 +25,10 @@ A Wordle solver that precomputes the best-known decision tree over all valid Wor
 - [x] Word list acquisition (`data/words.txt` 14,855 words; `data/answers.txt` 2,355 words)
 - [x] Pattern matrix precomputation (220M entries, ~210 MB, built in 0.5s on M2)
 - [x] Dynamic solver — answer-weighted entropy-greedy (`EntropySolver`, `solver.cpp`)
-- [x] **Worst-case-5 tree (issues #8, #27)** — `EntropySolver::is_feasible`/`best_guess_feasible`: DFS minimax (memoized on the candidate set) proves the answer set is solvable in worst-case 5 (the proven optimum; 4 is impossible); a feasibility-constrained entropy-greedy policy + `--lookahead` then minimises the mean (heuristic, not proven optimal). A **parallel opener sweep** (per-thread `EntropySolver`, atomic work-stealing, 3–5× multi-core) picks the lowest-mean opener → reast, worst-5, **mean 3.4870**, verified by the built-in evaluate().
+- [x] **Worst-case-5 tree (issues #8, #27)** — `EntropySolver::is_feasible`/`best_guess_feasible`: DFS minimax (memoized on the candidate set) finds a tree that solves the answer set in worst-case 5 (the best known; a 4-guess guarantee appears impossible); a feasibility-constrained entropy-greedy policy + `--lookahead` then lowers the mean (heuristic). A **parallel opener sweep** (per-thread `EntropySolver`, atomic work-stealing, 3–5× multi-core) picks the lowest-mean opener → reast, worst-5, **mean 3.4870**, verified by the built-in evaluate().
  - [x] **Metal GPU node-scoring (issue #12)** — `src/gpu_score.{hpp,mm}`: a compute shader scores all ~15k guesses (max_bucket + entropy) in one dispatch. Transposed-matrix (coalesced) layout → **14.8×** vs CPU (15.7× on the full list), verified identical. `tools/gpu_bench` benchmarks/verifies. Gated by `WP_HAVE_METAL`; non-Apple builds unaffected.
- - [x] Single precomputation tool — `build_db` (worst-5 parallel feasibility sweep; `--full` for full coverage; **`--exact-mean` for a provably minimal-mean tree**). SQLite + binary, verified by evaluate(). The earlier entropy/beam ("legacy") builder was removed — it was strictly inferior (worst-6, mean 3.8144).
-- [x] **Exact minimal-mean optimiser (issue #26)** — `EntropySolver::min_total`: branch-and-bound + transposition DP computes the provably minimal mean (worst≤5). Validated against Selby's proven optimum (reast on his 2309 list = 7896/3.4197, byte-identical to `wordle.cpp`). `build_db --exact-mean --start-word salet` emits a DB at **mean 3.4246** (vs greedy 3.4870), verified by evaluate().
+ - [x] Single precomputation tool — `build_db` (worst-5 parallel feasibility sweep; `--full` for full coverage; **`--exact-mean` for the lowest-mean tree the search can find**). SQLite + binary, verified by evaluate(). The earlier entropy/beam ("legacy") builder was removed — it was strictly inferior (worst-6, mean 3.8144).
+- [x] **Lowest-mean search (issue #26)** — `EntropySolver::min_total`: exhaustive branch-and-bound + transposition DP for the minimum-mean tree it can find (worst≤5). Corroborated by Selby's independently-computed value (reast on his 2309 list = 7896/3.4197, matching `wordle.cpp`) and a brute-force oracle on small inputs — best known, not a verified global optimum. `build_db --exact-mean --start-word salet` emits a DB at **mean 3.4246** (vs greedy 3.4870), verified by evaluate().
 - [x] CLI tool — `wordle` binary; `solve`, `play`, `eval`, `info`, `dump` modes
 - [x] Database integrity — FNV-1a checksum on every open
 - [x] Binary DB format — flat mmap'd `.bin` (`src/binarydb.*`) for true O(1) lookup; `build_db` exports it alongside the SQLite file; CLI auto-detects format. ~42% smaller, ~2× faster, no runtime SQLite dep
@@ -37,16 +37,19 @@ A Wordle solver that precomputes the best-known decision tree over all valid Wor
 - [x] Full-coverage build mode — `build_db --full` builds `wordle-full.db` covering all 14,855 guess words (worst-case depth 7, 0 failures)
 
 **Database results (default `build_db`, start word: reast):**
-- Worst case: **5 guesses** — the proven optimum for the curated answer set (4 is impossible). All 2,355 answers solved, 0 failures.
-- Mean depth: **3.4870 guesses** (lookahead 1, parallel opener sweep picks reast). This mean is a heuristic result, NOT claimed optimal. The **exact** optimum for the reast opener on our list is **3.4251** (issue #26; see the exact-mean section below). An exact-mean DB (`build_db --exact-mean`) achieves the true optimum.
+- Worst case: **5 guesses** — the best known for the curated answer set (a 4-guess guarantee appears impossible). All 2,355 answers solved, 0 failures.
+- Mean depth: **3.4870 guesses** (lookahead 1, parallel opener sweep picks reast). This mean is a heuristic result. The **lowest mean we've found** for the reast opener on our list is **3.4251** (issue #26; see the exact-mean section below). An exact-mean DB (`build_db --exact-mean`) reaches that best-known value.
 - Distribution: 41×2, 1176×3, 1072×4, 66×5 (zero 6+)
 - Built by `build_db --output wordle.db` (parallel sweep of top-50 openers @ sweep-lookahead 1) in ~1 min on 8 cores; `--lookahead K` refines the winner's tree (e.g. K=30 → 3.4679, ~80s); `--start-word W` skips the sweep; `--top 0` sweeps all openers
 - worst/mean are measured by the built-in `evaluate()` (SQLite==binary parity)
 - Answers source: cfreshman/a03ef2cba789d8cf00c08f767e0fad7b base (2,315 words) + 40 post-acquisition NYT additions, 0 removals → 2,355. (Relative to Selby's `wordlist_nyt20220830_hidden` (2,309, a strict subset), ours is +46: 2,355 = 2,309 + 46.) See `data/SOURCES.md`.
 
-**Naming note:** we deliberately avoid calling the builder or its output "optimal".
-Worst-case 5 *is* provably optimal; the mean is not. The metadata strategy label
-is `minimax-worst{D}-lookahead{K}` — describing what was done, not a quality claim.
+**Naming note:** we deliberately avoid calling the builder or its output "optimal"
+or "proven". Worst-case 5 is the best result we've found (and we believe 4 is
+unachievable, though we don't claim a formal proof); the mean is the lowest known,
+not a verified minimum. The metadata strategy label is
+`minimax-worst{D}-lookahead{K}` (or `exact-mean-worst{D}`) — describing the method
+used, not a quality claim.
 
 **Findings:**
 - The opener sweep picks `reast` (lowest mean among worst-5 trees at lookahead 1); `--lookahead 30` lowers the winner's mean to 3.4679.
@@ -55,7 +58,7 @@ is `minimax-worst{D}-lookahead{K}` — describing what was done, not a quality c
 
 **Architecture summary:**
 - `build_tree` runs a parallel opener sweep — each worker thread (own `EntropySolver`, private feasibility memo, atomic work-stealing) evaluates an opener via `tree_total_for_opener` at the cheap **sweep_lookahead** (default 1); the lowest-mean feasible opener wins, then the tree is emitted node-by-node via `best_guess_feasible` at **emit_lookahead** (`--lookahead`, default 1, winner only). The two lookaheads are separate so a high `--lookahead` refines the final mean without multiplying the sweep cost. `--start-word` skips the sweep; `--top` (default 50) caps it.
-- `is_feasible` (DFS minimax, memoized on the sorted candidate set, guesses ordered by max-bucket-size) is what makes worst-case 5 provable; `best_guess_feasible` then chooses, among budget-feasible guesses, the highest-entropy one (with `--lookahead` expanding the top-N).
+- `is_feasible` (DFS minimax, memoized on the sorted candidate set, guesses ordered by max-bucket-size) is what holds the tree to worst-case 5; `best_guess_feasible` then chooses, among budget-feasible guesses, the highest-entropy one (with `--lookahead` expanding the top-N).
 - `walk_target()` (database.cpp) is the single shared tree-walk used by both `build_db::evaluate` and the CLI `eval` mode, with a generous `WALK_DEPTH_CAP` so deep-but-valid paths report their true depth (not FAIL).
 - All DB writes happen in a single SQLite transaction (~1 min standard, ~40s full); `build_db` removes any prior artifact first so rebuilds to the same path succeed.
 - CLI lookup: one SQL query per step, ~5ms cold / µs amortized; `next_node` and `node_info` statements are lazily prepared and cached for the connection lifetime.
@@ -65,31 +68,35 @@ is `minimax-worst{D}-lookahead{K}` — describing what was done, not a quality c
 ## Known limitations
 
 - **`EvalResult::dist` is capped at depth 15** in `build_db.cpp`. Words solved at depth ≥ 16 would appear as failures. The current worst case is 7, so this is not a practical concern. (The CLI `eval` mode uses the shared `walk_target` with `WALK_DEPTH_CAP = 16` and reports true depths rather than capping at the DB's worst-case metric — issue #9, fixed.)
-- **Production DB mean (3.4870 default, 3.4679 with `--lookahead 30`) is above the exact optimum.** The worst-case-5 result is optimal, but the production builder's feasibility-constrained entropy-greedy + bounded-lookahead policy doesn't fully minimise the mean. **The exact minimal mean is now computable** — see below.
+- **Production DB mean (3.4870 default, 3.4679 with `--lookahead 30`) is above the lowest known mean.** The worst-case-5 result is the best known, but the production builder's feasibility-constrained entropy-greedy + bounded-lookahead policy doesn't fully minimise the mean. **The lowest-mean tree we can find is now computable** — see below.
 
-### Exact minimal-mean optimiser (issue #26, merged to `main`)
+### Lowest-mean search (issue #26, merged to `main`)
 
-`EntropySolver::min_total(S, depth, bound)` computes the **provably minimal**
-total/mean solve depth subject to the worst-case-5 cap, via branch-and-bound +
-transposition table. It is tractable on the full answer set with a forced opener
-(~35–90 s single-core on an M2) after several Selby-style optimisations:
-(1) `2|b|-1` per-guess lower bound + |H_i|-ordered partition loop;
+`EntropySolver::min_total(S, depth, bound)` searches for the **minimum total/mean
+solve depth it can find** subject to the worst-case-5 cap, via exhaustive
+branch-and-bound + transposition table. It is tractable on the full answer set
+with a forced opener (~35–90 s single-core on an M2) after several Selby-style
+optimisations: (1) `2|b|-1` per-guess lower bound + |H_i|-ordered partition loop;
 (2) LB-ordered guess iteration with whole-loop early break;
-(3) **lower-bound caching** — the memo stores a proven `lower` per subset and
+(3) **lower-bound caching** — the memo stores a `lower` bound per subset and
 child floors use `max(2k-1, cached_lower)` with a tight per-child bound (plus a
 stored-set hash-collision guard).
 
-**Validated against Selby's proven optimum.** Our guess list is byte-identical
-to Selby's `wordlist_nyt20220830_all` (14855); his hidden list (2309) is a subset
-of ours (2355 = 2309 + 46 later additions). On **Selby's exact 2309 list** our
-optimiser gives reast = **7896 / 3.4197**, matching the value proven by compiling
-and running Selby's own `wordle.cpp` (7896, 1.1 s). This end-to-end check caught
-two bugs (now fixed): a soundness bug that discarded improving trees found under
-a finite recursion bound (over-count), and a `--probe-buckets` display bug that
-omitted the +1-per-singleton cost (under-count). The forced-opener and full
-`min_total(set)` paths were always correct.
+**Corroborated against Selby's independently-computed value (not a proof).** Our
+guess list is byte-identical to Selby's `wordlist_nyt20220830_all` (14855); his
+hidden list (2309) is a subset of ours (2355 = 2309 + 46 later additions). On
+**Selby's exact 2309 list** our search gives reast = **7896 / 3.4197**, the same
+value his `wordle.cpp` reports (verified by compiling and running it: 7896,
+1.1 s). Two independent implementations agreeing is strong evidence, and we also
+match a brute-force reference on small inputs — but we have **not** independently
+verified a formal proof of global optimality (neither an audit of our pruning's
+admissibility nor of Selby's). Treat these as **best-known** values. This
+end-to-end check did catch two bugs (now fixed): a soundness bug that discarded
+improving trees found under a finite recursion bound (over-count), and a
+`--probe-buckets` display bug that omitted the +1-per-singleton cost
+(under-count). The forced-opener and full `min_total(set)` paths were unaffected.
 
-**Exact optimal means on our 2355-answer list (worst≤5):** salet **3.4246**
+**Lowest known means on our 2355-answer list (worst≤5):** salet **3.4246**
 (8065) and reast **3.4251** (8066) are essentially tied (salet ahead by 1 guess);
 other openers pending re-measurement with the fixed code. The production greedy
 ships 3.4870, so ~0.062 of mean is reclaimed by an exact-mean DB. Driver:
@@ -97,11 +104,11 @@ ships 3.4870, so ~0.062 of mean is reclaimed by an exact-mean DB. Driver:
 `--verify N` for a brute-force cross-check, `--worst-bucket` to isolate hard
 buckets). Full results + method in `BENCHMARKS.md`.
 
-**`build_db --exact-mean` emits an exact-mean DB** (requires `--start-word`; runs
+**`build_db --exact-mean` emits a lowest-mean DB** (requires `--start-word`; runs
 `min_total` once at the root, then emits via `optimal_guess` per node). Verified
 end to end with salet: evaluate() reports **mean 3.4246, worst 5, 0 failures**
 (dist 80/1236/998/41), SQLite==binary parity, CLI solves correctly. Strategy
-label `exact-mean-worst{D}`.
+label `exact-mean-worst{D}` (a method name, not a quality claim).
 
 **Remaining:** speed up the harder openers (e.g. tarse has a pathological
 size-115 `-er`/`-eed` endgame bucket that runs >100s) so an unforced exact opener
@@ -123,10 +130,10 @@ See the open GitHub issues for the remaining backlog from the code review — no
 | `CLAUDE.md` | This file |
 | `src/pattern.hpp/cpp` | Wordle pattern computation (G/Y/B encoding, 243 patterns) |
 | `src/wordlist.hpp/cpp` | Sorted word list with O(log N) lookup; rejects lists > 65,535 entries |
-| `src/solver.hpp/cpp` | `EntropySolver`: weighted entropy `best_guess`/`solve`; `is_feasible` (DFS minimax feasibility) + `best_guess_feasible`/`tree_total_for_opener` (worst-case-5 construction); `min_total`/`optimal_guess`/`cached_lower` (exact minimal-mean branch-and-bound DP, issue #26); `any_consistent_word` |
+| `src/solver.hpp/cpp` | `EntropySolver`: weighted entropy `best_guess`/`solve`; `is_feasible` (DFS minimax feasibility) + `best_guess_feasible`/`tree_total_for_opener` (worst-case-5 construction); `min_total`/`optimal_guess`/`cached_lower` (exhaustive lowest-mean branch-and-bound DP, issue #26); `any_consistent_word` |
 | `src/database.hpp/cpp` | SQLite decision tree + templated `walk_target` helper + bulk `all_nodes`/`all_edges` export (read/write, checksum, metadata, cached hot-path stmts) |
 | `src/binarydb.hpp/cpp` | Flat mmap'd `.bin` decision tree (`BinaryDb`): header+checksum, direct-indexed nodes, CSR pattern-sorted edges; `export_from(Database)` + read-only mmap lookup |
-| `tools/build_db.cpp` | **The single decision-tree builder** (worst-5 parallel feasibility sweep; `--full` for full coverage; `--exact-mean` for a provably minimal-mean tree, requires `--start-word`). Always runs evaluate() for measured metadata; exports SQLite + binary. Flags: `--start-word`, `--exact-mean`, `--lookahead` (emit refinement), `--sweep-lookahead`, `--top` (default 50; 0=all), `--jobs`, `--target-depth`, `--date`, `--binary`, `--no-binary` |
+| `tools/build_db.cpp` | **The single decision-tree builder** (worst-5 parallel feasibility sweep; `--full` for full coverage; `--exact-mean` for the lowest-mean tree the search can find, requires `--start-word`). Always runs evaluate() for measured metadata; exports SQLite + binary. Flags: `--start-word`, `--exact-mean`, `--lookahead` (emit refinement), `--sweep-lookahead`, `--top` (default 50; 0=all), `--jobs`, `--target-depth`, `--date`, `--binary`, `--no-binary` |
 | `tools/exact_mean.cpp` | Exact minimal-mean optimiser driver (`min_total`). `--start WORD`, `--probe-buckets`, `--verify N`, `--worst-bucket WORD`, `--answers F` |
 | `src/gpu_score.{hpp,mm}` | **Metal GPU scorer** — one-dispatch scoring of all guesses (max_bucket+entropy); transposed-matrix coalesced layout, 14.8× CPU |
 | `tools/gpu_bench.cpp` | GPU-vs-CPU scoring benchmark + parity check |

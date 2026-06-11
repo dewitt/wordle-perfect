@@ -62,7 +62,7 @@ The starting word is selected by the precomputation process as the root of the d
 Where multiple candidate words yield identical worst-case and mean-depth outcomes at a given decision tree node, the lexicographically first word is chosen, ensuring the database is deterministic and reproducible across independent builds from the same word lists.
 
 ### word_list_versioning
-The valid guess word list and valid answer word list are sourced from the NYT Wordle as of June 2026. Because the answer list has changed historically, any database artifact must document the exact source and retrieval date of the word lists used to build it. Rebuilding from a different word list snapshot may produce a different optimal tree.
+The valid guess word list and valid answer word list are sourced from the NYT Wordle as of June 2026. Because the answer list has changed historically, any database artifact must document the exact source and retrieval date of the word lists used to build it. Rebuilding from a different word list snapshot may produce a different best-known tree.
 
 ## Contracts
 

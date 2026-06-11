@@ -3,7 +3,7 @@
 Tracking the four hillclimbing targets, with the emphasis on **builder
 performance** (#3), which directly unlocks lower **mean depth** (#2):
 
-1. **Max depth** — done; 5 is provably optimal for the curated set (4 impossible).
+1. **Max depth** — done; 5 is the best known for the curated set (a 4-guess guarantee appears impossible).
 2. **Mean depth** — open; currently 3.4870 (lookahead 1). The cheaper the build,
    the wider the lookahead/sweep we can afford → lower mean.
 3. **Build time** — the active focus. Biggest lever.
@@ -93,7 +93,7 @@ that could be offloaded with parity, the build would approach ~6 s (≈5× vs th
 
 The blocker is **float vs double**: the GPU computes entropy in `float`, and the
 tiny differences reorder near-entropy ties, changing the chosen guess and
-producing a *different but equally-optimal* (worst-5 / 3.4870) tree. We require
+producing a *different but equal-scoring* (worst-5 / 3.4870) tree. We require
 byte-for-byte parity, so entropy ranking stays on the CPU in `double`.
 
 Attempts to bound the CPU entropy scan to just the GPU-identified
@@ -101,18 +101,18 @@ progress-making guesses, or to GPU-presort then CPU-recompute a top pool, did
 **not** reliably beat the current `--gpu` path (run-to-run thermal variance on
 the M2 ≈±15% swamped the gains) and risked breaking parity. So the practical
 ceiling for a *parity-preserving* GPU integration is roughly the current ~18 s
-sweep; reaching ~6 s requires either accepting a different-but-optimal tree
+sweep; reaching ~6 s requires either accepting a different-but-equal-scoring tree
 (GPU float entropy) or a bit-exact GPU entropy (Metal `double`, slower) — both
 deliberately not taken. Coarser whole-level batching could still trim the
 GPU-side `score_sets`/unpack overhead.
 
-## Exact minimal-mean optimisation (issue #26)
+## Lowest-mean search (issue #26)
 
-`EntropySolver::min_total` computes the **provably minimal** total/mean solve
-depth subject to the worst-case-5 cap, via branch-and-bound with a transposition
-table. After several rounds of Selby-style optimisation it is tractable on the
-full answer set with a forced opener (~35–90 s single-core on an M2; harder
-openers such as tarse are slower):
+`EntropySolver::min_total` searches for the **minimum total/mean solve depth it
+can find** subject to the worst-case-5 cap, via exhaustive branch-and-bound with
+a transposition table. After several rounds of Selby-style optimisation it is
+tractable on the full answer set with a forced opener (~35–90 s single-core on an
+M2; harder openers such as tarse are slower):
 
 1. **`2|b|-1` per-guess lower bound + |H_i|-ordered partition loop** — skip a
    guess without recursion when its admissible floor can't beat the incumbent;
@@ -120,36 +120,42 @@ openers such as tarse are slower):
 2. **LB-ordered guess iteration + whole-loop early break** — try lowest-floor
    guesses first; once a guess's floor can't beat the incumbent, every later
    guess is skipped wholesale.
-3. **Lower-bound caching** — the memo stores a proven `lower` per subset (always,
+3. **Lower-bound caching** — the memo stores a `lower` bound per subset (always,
    even when αβ-pruned); child-bucket floors use `max(2k-1, cached_lower)` and
    each child gets a tight `child_bound`. The memo also stores the candidate set
    and verifies it on read (64-bit hash-collision guard).
 
-### Validation against Selby's proven optimum
+### Corroboration against Selby's independently-computed value
 
 Our guess list (`data/words.txt`, 14855) is **byte-for-byte identical** to Alex
 Selby's `wordlist_nyt20220830_all`. His hidden list (2309) is a strict subset of
-ours (2355 = 2309 + 46 later NYT additions). Running our optimiser on **Selby's
-exact 2309 list** reproduces his proven optima exactly:
+ours (2355 = 2309 + 46 later NYT additions). Running our search on **Selby's
+exact 2309 list** reproduces the value he reports:
 
-| Opener | Our `min_total` (2309 list) | Selby (proven, `wordle.cpp`) |
-|--------|-----------------------------|------------------------------|
+| Opener | Our `min_total` (2309 list) | Selby (`wordle.cpp`) |
+|--------|-----------------------------|----------------------|
 | reast  | 7896 / 3.4197 | 7896 / 3.4197 ✓ |
 
 (verified by compiling and running Selby's own `wordle.cpp -w reast` — 7896,
-1.1 s.) This is strong end-to-end validation that `min_total` computes the true
-optimum. It also surfaced two bugs along the way (now fixed): a soundness bug
-that discarded improving trees found under a finite recursion bound (over-count),
-and a `--probe-buckets` display bug that omitted the +1-per-singleton-bucket cost
-(under-count by the number of singletons). The forced-opener and full
-`min_total(set)` paths were always correct.
+1.1 s.)
 
-### Exact optimal mean by opener (our 2355-answer / 14855-guess list, worst≤5)
+**What this does and doesn't establish.** Two independent implementations reaching
+the same number is strong evidence that `min_total` finds the true minimum, and we
+separately match a brute-force reference on small inputs. But we have **not**
+audited the admissibility of our pruning (or Selby's), nor independently produced
+a formal proof of global optimality — so we report these as the **best-known**
+values, not "the optimum". The cross-check did catch two real bugs (now fixed):
+a soundness bug that discarded improving trees found under a finite recursion
+bound (over-count), and a `--probe-buckets` display bug that omitted the
++1-per-singleton-bucket cost (under-count by the number of singletons). The
+forced-opener and full `min_total(set)` paths were unaffected.
+
+### Lowest known mean by opener (our 2355-answer / 14855-guess list, worst≤5)
 
 Computed via the (correct) forced-opener path `exact_mean --start W`:
 
-| Opener | Exact optimal mean | Total |
-|--------|--------------------|-------|
+| Opener | Lowest mean found | Total |
+|--------|-------------------|-------|
 | **salet** | **3.4246** | 8065 |
 | reast  | 3.4251 | 8066 |
 | _(others pending re-measurement with the fixed code)_ | | |
@@ -161,14 +167,15 @@ Findings:
   have been removed pending re-measurement.)
 - The 46 extra answer words raise reast's total from Selby's 7896 (2309) to 8066
   (2355) — ~3.7 guesses per extra word, as expected.
-- The production greedy builder ships **3.4870**; the exact optimum for its reast
-  opener is **3.4251**, so ~0.062 of mean is reclaimed by an exact-mean tree.
+- The production greedy builder ships **3.4870**; the lowest mean we've found for
+  its reast opener is **3.4251**, so ~0.062 of mean is reclaimed by an
+  exact-mean tree.
 
 ### Exact-mean DB emission (`build_db --exact-mean`)
 
 `build_db --exact-mean --start-word salet` runs `min_total` once at the root
-(~116 s single-core) then emits the optimal tree via `optimal_guess` per node.
-`evaluate()` (an independent walk of the finished tree) confirms:
+(~116 s single-core) then emits the lowest-mean tree found via `optimal_guess`
+per node. `evaluate()` (an independent walk of the finished tree) confirms:
 
 ```
 strategy=exact-mean-worst5 start=salet worst=5 mean=3.4246 nodes=2490

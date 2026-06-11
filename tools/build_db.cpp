@@ -1,15 +1,16 @@
 // build_db — the Wordle decision-tree builder.
 //
 // Builds a tree that solves every answer within the smallest worst-case depth
-// the search can prove reachable (5 for the curated answer set — provably
-// optimal; 4 is impossible), then minimises the mean among such trees. A
+// the search can reach (5 for the curated answer set — the best known; a 4-guess
+// guarantee appears impossible), then lowers the mean among such trees. A
 // parallel opener sweep (feasibility-constrained, multi-threaded) picks the
 // lowest-mean opener; the chosen tree is emitted and independently verified.
 //
-// NOTE on the worst-case-5 claim: minimising the *worst case* to 5 is provably
-// optimal for the curated set. The *mean* (≈3.49) is NOT claimed optimal — the
-// feasibility-constrained entropy policy is a strong heuristic, not exhaustive
-// mean-optimal DP. So we avoid calling the builder itself "optimal".
+// NOTE on claims: worst-case 5 is the best result we've found (we believe 4 is
+// unachievable, but don't claim a formal proof). The *mean* (≈3.49 default) is a
+// heuristic from the feasibility-constrained entropy policy; --exact-mean runs an
+// exhaustive search for the lowest mean it can find (best known, corroborated by
+// Selby's wordle.cpp — see BENCHMARKS.md). We avoid calling either "optimal".
 //
 // Flags:
 //   --full             : cover every guess word as an answer (worst-case 7).
@@ -247,11 +248,11 @@ BuildResult build_tree(const WordList& wl, const PatternMatrix& pm,
     EntropySolver solver{wl, pm};
     solver.set_gpu_scorer(gpu_ptr);
 
-    // Exact-mean mode: solve the provably minimal-mean tree once at the root.
-    // min_total memoises the optimal first guess for EVERY subset on the optimal
-    // tree, so the recursive emit below just reads optimal_guess() per node.
+    // Exact-mean mode: run the lowest-mean search once at the root. min_total
+    // memoises the best first guess found for EVERY subset on that tree, so the
+    // recursive emit below just reads optimal_guess() per node.
     if (exact_mean) {
-        std::println("  solving exact minimal-mean tree (worst<={})...", worst_cap);
+        std::println("  searching for the lowest-mean tree (worst<={})...", worst_cap);
         const auto mt0 = Clock::now();
         // Fix the opener, then min_total each non-solved bucket so optimal_guess
         // is populated for every node reachable under this opener.
@@ -384,7 +385,7 @@ int main(int argc, char** argv) {
     const bool full_mode  = has_flag("--full");
     const bool no_binary  = has_flag("--no-binary");
     const bool use_gpu    = has_flag("--gpu");   // Metal-batched bucket ranking
-    const bool exact_mean = has_flag("--exact-mean");  // provably minimal-mean tree
+    const bool exact_mean = has_flag("--exact-mean");  // lowest-mean tree the search finds
 
     std::string start_word;
     std::string words_date_override;
@@ -416,7 +417,7 @@ int main(int argc, char** argv) {
         if (nthreads == 0) nthreads = std::max(1u, std::thread::hardware_concurrency());
     }
 
-    // Worst-case target defaults: curated answers = 5 (proven optimum),
+    // Worst-case target defaults: curated answers = 5 (best known),
     // full coverage = 7.
     if (!target_depth_explicit) target_depth = full_mode ? 7 : 5;
 
@@ -495,8 +496,9 @@ int main(int argc, char** argv) {
                           fixed_root, nthreads, use_gpu, exact_mean);
     const std::uint64_t nodes_written = res.nodes;
     const double build_s = elapsed_s(t0);
-    // Label records *what was done*, not a quality claim: "minimax" = worst-case
-    // minimised (provably optimal at 5); the mean is heuristic, not claimed optimal.
+    // Label records *what method was used*, not a quality claim: "minimax" =
+    // worst-case minimised (to 5); "exact-mean" = exhaustive lowest-mean search.
+    // Neither is asserted to be a proven global optimum.
     const std::string strategy_label = exact_mean
         ? std::format("exact-mean-worst{}", target_depth)
         : std::format("minimax-worst{}-lookahead{}", target_depth, emit_lookahead);

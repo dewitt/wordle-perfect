@@ -1,8 +1,10 @@
-// exact_mean.cpp — exact minimal-mean optimiser (branch-and-bound DP).
+// exact_mean.cpp — lowest-mean tree search (exhaustive branch-and-bound DP).
 //
-// Computes the provably minimal total/mean solve depth subject to a worst-case
-// cap, via EntropySolver::min_total (transposition + alpha-beta). With a forced
-// --start it fixes the opener; otherwise it searches all openers (expensive).
+// Searches for the minimum total/mean solve depth it can find subject to a
+// worst-case cap, via EntropySolver::min_total (transposition + alpha-beta). The
+// result is best-known, not a verified global optimum (corroborated by Selby's
+// wordle.cpp and a brute-force oracle — see BENCHMARKS.md). With a forced --start
+// it fixes the opener; otherwise it searches all openers (expensive).
 //
 // Usage: exact_mean [--start WORD] [--max-depth D] [--words F] [--answers F]
 

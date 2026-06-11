@@ -198,24 +198,28 @@ public:
 
     // ── Exact mean optimisation: minimal total depth subject to worst<=depth ──
     //
-    // min_total(S, depth) = the MINIMUM achievable Σ-over-answers-in-S of their
-    // solve depth (counted from this node; a direct hit = 1), over all decision
-    // trees whose worst-case depth is <= `depth`. Returns MIN_TOTAL_INFEASIBLE
-    // if S cannot be solved within `depth`. This is the provably-optimal mean
-    // (not the entropy heuristic), found by branch-and-bound:
-    //   (a) worst-case cap `depth` bounds the search (we already prove D*=5);
+    // min_total(S, depth) = the LOWEST Σ-over-answers-in-S of their solve depth
+    // (counted from this node; a direct hit = 1) that this exhaustive search
+    // finds, over all decision trees whose worst-case depth is <= `depth`.
+    // Returns MIN_TOTAL_INFEASIBLE if S cannot be solved within `depth`. This is
+    // the lowest-mean tree the search can find (not the entropy heuristic); the
+    // search is exhaustive within its pruning, so absent an admissibility audit
+    // of the bounds below we treat the result as best-known rather than a proven
+    // global minimum (it is corroborated by Selby's wordle.cpp and a brute-force
+    // oracle on small inputs — see BENCHMARKS.md). Found by branch-and-bound:
+    //   (a) worst-case cap `depth` bounds the search (the builder holds D*=5);
     //   (b) alpha-beta on the running total — abandon a guess once its partial
     //       sum reaches the incumbent / passed-in `bound`;
     //   (c) TRANSPOSITION: memoised on the sorted candidate set (the value is
     //       independent of the guess order that produced S), keyed exactly.
-    // The optimal first guess for S is recorded in the transposition table and
+    // The best first guess found for S is recorded in the transposition table and
     // retrievable via optimal_guess().
     static constexpr int MIN_TOTAL_INFEASIBLE = std::numeric_limits<int>::max();
     [[nodiscard]] int min_total(std::span<const WordIndex> candidates,
                                 int depth,
                                 int bound = MIN_TOTAL_INFEASIBLE) const;
-    // After min_total has solved `candidates` at `depth`, the optimal first guess
-    // (or NPOS). For tree emission.
+    // After min_total has solved `candidates` at `depth`, the lowest-mean first
+    // guess found (or NPOS). For tree emission.
     [[nodiscard]] WordIndex optimal_guess(std::span<const WordIndex> candidates,
                                           int depth) const;
 
@@ -265,22 +269,23 @@ private:
     // so the production build (which calls it once per node) doesn't recompute
     // the full-vocabulary entropy ranking for recurring candidate sets.
     mutable std::unordered_map<std::uint64_t, WordIndex> feas_choice_;
-    // Transposition table for the exact min_total DP: key = hash(sorted set,
-    // depth) → {proven lower bound, exact total (if solved), optimal guess}.
-    //   lower : best proven lower bound for this subset (always valid; only
-    //           grows). Used to tighten child-bucket floors during pruning.
-    //   total : the exact optimum if proven (== lower), else INFEASIBLE meaning
-    //           "not yet solved exactly" (the lower bound is still usable).
-    //   guess : optimal first guess (valid only when total is exact).
+    // Transposition table for the min_total search: key = hash(sorted set,
+    // depth) → {lower bound, fully-searched total (if known), best guess}.
+    //   lower : a sound lower bound for this subset (always valid; only grows).
+    //           Used to tighten child-bucket floors during pruning.
+    //   total : the value once the subset has been searched without an external
+    //           cutoff (== lower), else INFEASIBLE meaning "not yet fully
+    //           searched" (the lower bound is still usable).
+    //   guess : best first guess found (valid only when total is set).
     // A subset's lower bound is a sound floor regardless of the αβ `bound` the
     // call ran under, so it is always safe to record and reuse.
     struct TotEntry {
         int       lower = 0;
-        int       total = std::numeric_limits<int>::max();  // INFEASIBLE = unsolved
+        int       total = std::numeric_limits<int>::max();  // INFEASIBLE = unsearched
         WordIndex guess = WordList::NPOS;
         // The exact candidate set this entry describes, so a 64-bit hash
         // collision can be detected (different set, same key) and rejected
-        // rather than silently corrupting the optimal total.
+        // rather than silently corrupting the stored total.
         std::vector<WordIndex> set;
     };
     mutable std::unordered_map<std::uint64_t, TotEntry> tot_memo_;

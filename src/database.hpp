@@ -78,7 +78,7 @@ public:
     [[nodiscard]] std::expected<std::pair<WordIndex, Depth>, std::string>
     node_info(NodeId node_id) const;
 
-    // Word index at root (= optimal first guess)
+    // Word index at root (the start word / first guess)
     [[nodiscard]] std::expected<WordIndex, std::string> root_word() const;
 
     // Build helpers — used by build_db during precomputation
