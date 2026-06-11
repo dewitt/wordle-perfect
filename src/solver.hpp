@@ -239,6 +239,7 @@ public:
     [[nodiscard]] const Stats& stats() const noexcept { return stats_; }
     [[nodiscard]] std::size_t feas_memo_size()   const noexcept { return feas_memo_.size(); }
     [[nodiscard]] std::size_t choice_memo_size() const noexcept { return feas_choice_.size(); }
+    [[nodiscard]] std::size_t tot_memo_size()    const noexcept { return tot_memo_.size(); }
 
 private:
     // Compute weighted Shannon entropy.

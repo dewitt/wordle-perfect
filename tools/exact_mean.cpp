@@ -28,6 +28,7 @@ int main(int argc, char** argv) {
     int max_depth = 5;
     bool probe = false;
     int verify = 0;  // if >0, cross-check min_total vs brute force on first N answers
+    std::string worst_bucket;  // if set, isolate+solve the single largest bucket of this opener
     std::vector<std::string_view> a(argv + 1, argv + argc);
     for (std::size_t i = 0; i < a.size(); ++i) {
         if (a[i] == "--probe-buckets") probe = true;
@@ -37,6 +38,7 @@ int main(int argc, char** argv) {
         if (a[i] == "--start") start = a[i + 1];
         if (a[i] == "--max-depth") max_depth = std::stoi(std::string(a[i + 1]));
         if (a[i] == "--verify") verify = std::stoi(std::string(a[i + 1]));
+        if (a[i] == "--worst-bucket") worst_bucket = a[i + 1];
     }
 
     auto wl = WordList::load(words_path);
@@ -57,6 +59,51 @@ int main(int argc, char** argv) {
     }
     std::ranges::sort(cand);
     const int n = static_cast<int>(cand.size());
+
+    if (!worst_bucket.empty()) {
+        // Isolate the single largest non-trivial bucket of `worst_bucket` and
+        // time min_total on it alone — a fast iteration loop for tuning the
+        // large-bucket search. Also reports the greedy upper bound (the seed)
+        // vs the exact optimum, to gauge seed quality.
+        auto gi = wl->index_of(worst_bucket);
+        if (gi == WordList::NPOS) { std::println(stderr, "opener not found"); return 1; }
+        auto buckets = EntropySolver::partition(cand, gi, pm);
+        Pattern bestp = 0; std::size_t bestsz = 0;
+        for (Pattern p = 0; p < PATTERN_COUNT; ++p) {
+            if (p == PATTERN_SOLVED) continue;
+            if (buckets[p].size() > bestsz) { bestsz = buckets[p].size(); bestp = p; }
+        }
+        (void)bestp; (void)bestsz;
+        // Solve every bucket of size >= 100 in isolation, DESCENDING by size,
+        // each on a FRESH solver (cold memo) so per-bucket times are comparable.
+        std::vector<std::pair<int, Pattern>> big;
+        for (Pattern p = 0; p < PATTERN_COUNT; ++p) {
+            if (p == PATTERN_SOLVED) continue;
+            if (buckets[p].size() >= 100)
+                big.emplace_back(static_cast<int>(buckets[p].size()), p);
+        }
+        std::ranges::sort(big, [](auto& x, auto& y){ return x.first > y.first; });
+        std::println("opener {}: {} buckets of size>=100 (depth budget {})",
+            worst_bucket, big.size(), max_depth - 1);
+        std::fflush(stdout);
+        for (auto& [sz, p] : big) {
+            // Show a sample of the bucket's words to reveal its structure.
+            std::string sample;
+            for (std::size_t i = 0; i < buckets[p].size() && i < 20; ++i)
+                sample += std::string((*wl)[buckets[p][i]].view()) + " ";
+            std::println("  size={:4d} sample: {}{}", sz, sample,
+                buckets[p].size() > 20 ? "..." : "");
+            std::fflush(stdout);
+            EntropySolver fresh{*wl, pm};
+            auto bt0 = Clock::now();
+            int mt = fresh.min_total(buckets[p], max_depth - 1);
+            double s = std::chrono::duration<double>(Clock::now() - bt0).count();
+            std::println("  size={:4d}  min_total={:5d}  ({:7.2f}s)  memo={}",
+                sz, mt, s, fresh.tot_memo_size());
+            std::fflush(stdout);
+        }
+        return 0;
+    }
 
     if (verify > 0) {
         // Independent brute force with only the 2k-1 admissible alpha-beta —
