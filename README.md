@@ -15,7 +15,7 @@ Two precomputed databases are available. The standard DB is the default; the ful
 | Start word | **reast** (chosen by the parallel opener sweep) |
 | Answers covered | 2,355 (all known NYT answer words) |
 | Worst case | **5 guesses** (best known for this set; a 4-guess guarantee appears impossible) |
-| Mean depth | **3.4870 guesses** (entropy-greedy; the lowest mean we've found is 3.4251 for reast / 3.4246 for salet — see `--exact-mean`) |
+| Mean depth | **3.4870 guesses** (entropy-greedy; the lowest mean we've found is **3.4225** with the tarse opener via the exact opener sweep — see `--exact-mean`) |
 | Per-query latency | O(1) lookup; mmap'd binary DB (`wordle.bin`) or SQLite (`wordle.db`) |
 
 Distribution (reast, lookahead 1): 41×2, 1176×3, 1072×4, 66×5.
@@ -45,6 +45,12 @@ cap. It currently requires a forced opener:
 This emits the lowest-mean tree the search finds — **mean 3.4246** for salet
 (vs the greedy 3.4870), worst-case 5, 0 failures, distribution
 80×2 / 1236×3 / 998×4 / 41×5.
+
+An exact **opener sweep** (`exact_mean --sweep`) ranks all openers by a cheap
+lower bound and searches the strongest ones in parallel; on our list the
+lowest-mean opener it finds is **tarse (mean 3.4225)**, ahead of salet (3.4246)
+and reast (3.4251). (Wiring this opener selection into `build_db` is tracked in
+issue #30.)
 
 **On the strength of this result:** on Alex Selby's list (his guess list is
 byte-identical to ours; his 2,309-word answer list is a subset of our 2,355) our
