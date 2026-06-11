@@ -512,27 +512,53 @@ int EntropySolver::min_total(std::span<const WordIndex> candidates, int depth,
         }
     }
     for (auto& [mb, gi] : order) {
-        // A guess's own admissible floor: n (everyone pays for this guess) +
-        // (n - #buckets) ... cheaply: a guess whose largest bucket can't be
-        // solved in depth-1 is still allowed, recursion handles it. Floor by
-        // partition shape: total >= n + Σ_buckets(|b|>1)(|b|).  Compute lazily.
         auto buckets = partition(candidates, gi, patterns_);
-        int total = n;
-        bool feasible = true;
-        // Recurse into non-solved buckets; children computed EXACTLY (bound=
-        // INFEASIBLE) so their memo entries stay sound. αβ via `best` cutoff.
-        for (Pattern p = 0; p < PATTERN_COUNT && feasible; ++p) {
+
+        // Collect this guess's non-solved buckets and compute an admissible
+        // lower bound on its total BEFORE any recursion. A bucket of size k
+        // costs >= 2k-1 at the next level (one word resolved in 1 guess, the
+        // other k-1 in >=2); a singleton costs 1. So:
+        //   LB(gi) = n + Σ_singletons 1 + Σ_{|b|>=2} (2|b|-1).
+        // If LB(gi) >= best, this guess can never beat the incumbent — skip it
+        // entirely (no partition recursion). (Selby's 2|H|-1 lower bound.)
+        struct Sub { Pattern p; int sz; };
+        std::vector<Sub> subs;
+        subs.reserve(64);
+        int lb = n;
+        for (Pattern p = 0; p < PATTERN_COUNT; ++p) {
             if (p == PATTERN_SOLVED) continue;
-            auto& b = buckets[p];
-            if (b.empty()) continue;
-            int sub;
-            if (b.size() == 1) sub = 1;
-            else {
-                sub = min_total(b, depth - 1, MIN_TOTAL_INFEASIBLE);
-                if (sub >= MIN_TOTAL_INFEASIBLE) { feasible = false; break; }
-            }
+            const int sz = static_cast<int>(buckets[p].size());
+            if (sz == 0) continue;
+            if (sz == 1) { lb += 1; continue; }   // singleton: exact cost 1
+            lb += 2 * sz - 1;                       // admissible floor for |b|>=2
+            subs.push_back({p, sz});
+        }
+        if (lb >= best) continue;                   // LB prune (no recursion)
+
+        // Process buckets in ascending size order: small ones resolve quickly
+        // and raise the running total fast, so the αβ cutoff fires earlier on
+        // the expensive large buckets. We also keep a running lower bound on the
+        // *unprocessed* buckets so the cutoff is as tight as possible.
+        std::ranges::sort(subs, [](const Sub& a, const Sub& b){ return a.sz < b.sz; });
+        int rem_lb = 0;                             // Σ (2|b|-1) over subs
+        for (auto& s : subs) rem_lb += 2 * s.sz - 1;
+
+        int total = n;
+        for (Pattern p = 0; p < PATTERN_COUNT; ++p) {
+            if (p == PATTERN_SOLVED) continue;
+            if (buckets[p].size() == 1) total += 1;   // singletons counted here
+        }
+
+        bool feasible = true;
+        for (auto& s : subs) {
+            rem_lb -= 2 * s.sz - 1;                  // this bucket leaves the LB
+            // αβ with remaining lower bound: if even the optimistic floor for
+            // this + later buckets can't beat `best`, give up on this guess.
+            if (total + (2 * s.sz - 1) + rem_lb >= best) { feasible = false; break; }
+            const int sub = min_total(buckets[s.p], depth - 1, MIN_TOTAL_INFEASIBLE);
+            if (sub >= MIN_TOTAL_INFEASIBLE) { feasible = false; break; }
             total += sub;
-            if (total >= best) { feasible = false; break; }  // αβ: can't beat
+            if (total + rem_lb >= best) { feasible = false; break; }  // αβ cutoff
         }
         if (feasible && total < best) { best = total; best_gi = gi; }
     }

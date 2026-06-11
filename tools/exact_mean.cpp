@@ -25,8 +25,11 @@ int main(int argc, char** argv) {
     std::string words_path = "data/words.txt", answers_path = "data/answers.txt";
     std::string start;
     int max_depth = 5;
+    bool probe = false;
     std::vector<std::string_view> a(argv + 1, argv + argc);
-    for (std::size_t i = 0; i + 1 < a.size(); ++i) {
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        if (a[i] == "--probe-buckets") probe = true;
+        if (i + 1 >= a.size()) continue;
         if (a[i] == "--words") words_path = a[i + 1];
         if (a[i] == "--answers") answers_path = a[i + 1];
         if (a[i] == "--start") start = a[i + 1];
@@ -55,6 +58,40 @@ int main(int argc, char** argv) {
     t0 = Clock::now();
     int total = EntropySolver::MIN_TOTAL_INFEASIBLE;
     WordIndex root = WordList::NPOS;
+
+    if (probe && !start.empty()) {
+        // Partition on `start` and time min_total per non-solved bucket so we
+        // can localise the cost. Process buckets ascending by size.
+        auto gi = wl->index_of(start);
+        if (gi == WordList::NPOS) { std::println(stderr, "start not found"); return 1; }
+        auto buckets = EntropySolver::partition(cand, gi, pm);
+        std::vector<std::pair<int, Pattern>> order;
+        for (Pattern p = 0; p < PATTERN_COUNT; ++p) {
+            if (p == PATTERN_SOLVED || buckets[p].size() <= 1) continue;
+            order.emplace_back(static_cast<int>(buckets[p].size()), p);
+        }
+        std::ranges::sort(order);
+        std::println("opener {} -> {} non-trivial buckets", start, order.size());
+        {
+            std::string sizes;
+            for (auto& [sz, p] : order) sizes += std::to_string(sz) + " ";
+            std::println("bucket sizes: {}", sizes);
+            std::fflush(stdout);
+        }
+        int run = n;  // n for the opener + 1 per singleton handled implicitly
+        for (auto& [sz, p] : order) {
+            auto bt0 = Clock::now();
+            int sub = solver.min_total(buckets[p], max_depth - 1);
+            double bs = std::chrono::duration<double>(Clock::now() - bt0).count();
+            std::println("  bucket size={:4d}  min_total={:5d}  ({:6.2f}s)  memo={}",
+                sz, sub, bs, solver.choice_memo_size());
+            std::fflush(stdout);
+            run += sub;
+        }
+        std::println("probe done: opener {} total={} mean={:.4f}",
+            start, run, double(run) / n);
+        return 0;
+    }
 
     if (!start.empty()) {
         // Fix the opener: total = n + Σ over the opener's non-solved buckets of
