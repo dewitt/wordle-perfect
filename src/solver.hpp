@@ -222,6 +222,10 @@ public:
     // guess found (or NPOS). For tree emission.
     [[nodiscard]] WordIndex optimal_guess(std::span<const WordIndex> candidates,
                                           int depth) const;
+    // Diagnostic: the greedy feasibility-policy total (a valid upper bound on
+    // min_total), exposed for measuring incumbent quality. INFEASIBLE if none.
+    [[nodiscard]] int greedy_total(std::span<const WordIndex> candidates,
+                                   int depth) const { return feasible_total(candidates, depth); }
 
     // Solve for a known target word, returning the full step sequence.
     // answer_idx must be a valid index into the WordList.
@@ -239,6 +243,8 @@ public:
         std::uint64_t partitions       = 0;  // partition() calls (a proxy for work)
         std::uint64_t choice_calls     = 0;  // best_guess_feasible() invocations
         std::uint64_t choice_hits      = 0;  // ... served from the choice memo
+        std::uint64_t mintotal_calls   = 0;  // min_total() invocations (search nodes)
+        std::uint64_t mintotal_hits    = 0;  // ... served exactly from tot_memo_
     };
     [[nodiscard]] const Stats& stats() const noexcept { return stats_; }
     [[nodiscard]] std::size_t feas_memo_size()   const noexcept { return feas_memo_.size(); }
@@ -279,10 +285,14 @@ private:
     //   guess : best first guess found (valid only when total is set).
     // A subset's lower bound is a sound floor regardless of the αβ `bound` the
     // call ran under, so it is always safe to record and reuse.
+    // Below this set size, cached_lower skips the O(k·W) val()-floor scan — small
+    // sets are searched directly in negligible time, so the scan wouldn't pay.
+    static constexpr int VAL_FLOOR_MIN_K = 12;
     struct TotEntry {
         int       lower = 0;
         int       total = std::numeric_limits<int>::max();  // INFEASIBLE = unsearched
         WordIndex guess = WordList::NPOS;
+        bool      val_floor_done = false;  // the val()-floor scan has run for this set
         // The exact candidate set this entry describes, so a 64-bit hash
         // collision can be detected (different set, same key) and rejected
         // rather than silently corrupting the stored total.

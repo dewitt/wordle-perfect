@@ -198,11 +198,21 @@ std::uint64_t feas_hash(std::span<const WordIndex> s, int depth) {
     return mb;
 }
 
-// Admissible lower bound on min_total for a single guess, computed in one
-// histogram pass (no candidate-list materialisation). A non-solved bucket of
-// size k costs >= 2k-1 below this guess; a singleton costs 1; everyone pays 1
-// for the guess itself (the +n). The SOLVED bucket (the guess == answer) is a
-// direct hit costing 1, already in the +n. Returns {lb, max_bucket}.
+// Admissible lower bound on min_total for a single guess `gi`, computed in one
+// histogram pass (no candidate-list materialisation). This is Selby's val()
+// bound (sonorouschocolate.com, wordle.cpp minoverwords):
+//
+//   lb(gi) = n + Σ_classes (2·|class| − 1) − |GGGGG class|
+//          = 3n − (#distinct response classes) − (1 if gi ∈ S)
+//
+// Derivation: every word pays 1 for this guess (the +n). Each response class of
+// size s needs >= 2s−1 further moves (one word resolved in 1 more guess, the
+// other s−1 in >=2). The all-green class (gi itself, if gi ∈ S) is already
+// solved, so it needs nothing further → subtract its count.
+//
+// This strictly dominates the old 2k−1 floor whenever a guess fails to split S
+// into all singletons — i.e. exactly the poorly-splitting "endgame" sets where
+// 2k−1 was hopelessly loose. Returns {lb, max_bucket}.
 struct GuessLB { int lb; int max_bucket; };
 [[gnu::hot]] GuessLB guess_lower_bound(const PatternMatrix& pm,
                                        std::span<const WordIndex> candidates,
@@ -211,20 +221,17 @@ struct GuessLB { int lb; int max_bucket; };
     Pattern seen[PATTERN_COUNT];
     int nseen = 0, mb = 0;
     const int n = static_cast<int>(candidates.size());
+    int lb = n;  // everyone pays for this guess (+n)
     for (WordIndex ai : candidates) {
         const Pattern p = pm.get(gi, ai);
         const int c = ++hist[p];
-        if (c == 1) seen[nseen++] = p;
+        if (c == 1) seen[nseen++] = p;     // new class: +1 (the "−1" in 2s−1)
+        else        lb += 2;               // repeat: +2 per extra word in a class
         if (c > mb) mb = c;
     }
-    int lb = n;  // everyone pays for this guess
-    for (int i = 0; i < nseen; ++i) {
-        const Pattern p = seen[i];
-        const int c = hist[p];
-        if (p != PATTERN_SOLVED && c >= 2) lb += 2 * c - 1;  // bucket floor 2k-1
-        // singletons and the SOLVED hit cost their already-counted 1 (in n)
-        hist[p] = 0;  // sparse reset
-    }
+    lb += nseen;                            // +1 per class (completes 2s−1 per class)
+    lb -= hist[PATTERN_SOLVED];             // the all-green class is already solved
+    for (int i = 0; i < nseen; ++i) hist[seen[i]] = 0;  // sparse reset
     return {lb, mb};
 }
 
@@ -492,6 +499,7 @@ int EntropySolver::tree_total_for_opener(std::span<const WordIndex> candidates,
 // global optimum (see the header comment and BENCHMARKS.md).
 int EntropySolver::min_total(std::span<const WordIndex> candidates, int depth,
                              int bound) const {
+    ++stats_.mintotal_calls;
     const int n = static_cast<int>(candidates.size());
     if (n == 0) return 0;
     if (n == 1) return 1;                       // solved by guessing it
@@ -510,7 +518,7 @@ int EntropySolver::min_total(std::span<const WordIndex> candidates, int depth,
         // 64-bit hash collision silently returning another set's value).
         const bool same = std::ranges::equal(e.set, candidates);
         if (same) {
-            if (e.total < MIN_TOTAL_INFEASIBLE) return e.total;  // fully searched, reuse
+            if (e.total < MIN_TOTAL_INFEASIBLE) { ++stats_.mintotal_hits; return e.total; }
             if (e.lower > set_lower) set_lower = e.lower;         // tighter floor
         }
     }
@@ -553,6 +561,22 @@ int EntropySolver::min_total(std::span<const WordIndex> candidates, int depth,
             if (a.first != b.first) return a.first < b.first;
             return a.second < b.second;
         });
+    }
+
+    // Tighten the set's floor with the min-over-guesses lower bound. For any
+    // guess g, lb(g) = n + Σ_{|b|>=2}(2|b|-1) is an admissible lower bound on
+    // min_total(S) (every tree picks some first guess, and each child costs at
+    // least its 2k-1 floor). So the smallest lb(g) — order.front() after the
+    // ascending sort — is a valid, far tighter floor than the structural 2n-1,
+    // especially for poorly-splitting "endgame" sets where 2n-1 is hopelessly
+    // loose. This both fires the early-out below and tightens cached_lower for
+    // parents (we record it via slot_for on every exit path).
+    if (!order.empty() && order.front().first > set_lower)
+        set_lower = order.front().first;
+    if (set_lower >= bound) {                  // re-check with the tighter floor
+        TotEntry& e = slot_for();
+        if (set_lower > e.lower) e.lower = set_lower;
+        return MIN_TOTAL_INFEASIBLE;
     }
 
     // (b) Seed the incumbent with a quick greedy-feasible upper bound so alpha-
@@ -660,16 +684,52 @@ int EntropySolver::min_total(std::span<const WordIndex> candidates, int depth,
 }
 
 // Best known admissible lower bound on min_total(b, depth).
+//
+// Returns max of:
+//   • 2k−1 (structural floor),
+//   • the memoised bound/exact value for this set (if present),
+//   • the min-over-guesses val() floor  min_g lb(g) = 3k − max_g(classes),
+//     computed once per set and cached. This is the key endgame accelerator:
+//     for poorly-splitting sets (small max-classes B) it is ≈ 3k − B, far above
+//     2k−1, so parents can prune child guesses without recursing into them.
+// The per-set scan is O(k·W); we only pay it for sets large enough to matter and
+// cache the result, so the heavy transposition reuse amortises it.
 int EntropySolver::cached_lower(std::span<const WordIndex> b, int depth) const {
     const int k = static_cast<int>(b.size());
     if (k <= 1) return k;                 // 0→0, 1→1 (direct hit)
     int lo = 2 * k - 1;                   // structural floor
     const std::uint64_t key = feas_hash(b, depth) ^ 0x6D7E'A11Cull;
-    if (auto it = tot_memo_.find(key); it != tot_memo_.end()) {
+    auto it = tot_memo_.find(key);
+    if (it != tot_memo_.end() && std::ranges::equal(it->second.set, b)) {
         const TotEntry& e = it->second;
-        if (std::ranges::equal(e.set, b)) {   // ignore on hash collision
-            const int cand = (e.total < MIN_TOTAL_INFEASIBLE) ? e.total : e.lower;
-            if (cand > lo) lo = cand;
+        const int cand = (e.total < MIN_TOTAL_INFEASIBLE) ? e.total : e.lower;
+        if (cand > lo) lo = cand;
+        if (e.total < MIN_TOTAL_INFEASIBLE) return lo;  // exact: can't do better
+    }
+    // Compute (once) the cheap val() floor for this set and fold it into the
+    // memo's lower bound. Worth the O(k·W) scan only for non-tiny sets; tiny
+    // ones are searched directly in negligible time.
+    if (k >= VAL_FLOOR_MIN_K) {
+        const bool need = (it == tot_memo_.end()) ||
+                          !std::ranges::equal(it->second.set, b) ||
+                          !it->second.val_floor_done;
+        if (need) {
+            int best_lb = MIN_TOTAL_INFEASIBLE;
+            const std::size_t W = words_.size();
+            for (std::size_t g = 0; g < W; ++g) {
+                const auto [lb, mb] = guess_lower_bound(
+                    patterns_, b, static_cast<WordIndex>(g));
+                if (mb == k) continue;             // no progress
+                if (lb < best_lb) best_lb = lb;
+            }
+            TotEntry& e = tot_memo_[key];
+            if (!std::ranges::equal(e.set, b)) {   // fresh / collision slot
+                e = TotEntry{};
+                e.set.assign(b.begin(), b.end());
+            }
+            if (best_lb > e.lower) e.lower = best_lb;
+            e.val_floor_done = true;
+            if (e.lower > lo) lo = e.lower;
         }
     }
     return lo;

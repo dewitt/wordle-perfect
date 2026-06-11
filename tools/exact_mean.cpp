@@ -97,11 +97,16 @@ int main(int argc, char** argv) {
                 buckets[p].size() > 20 ? "..." : "");
             std::fflush(stdout);
             EntropySolver fresh{*wl, pm};
+            const int ub = fresh.greedy_total(buckets[p], max_depth - 1);
+            std::println("  size={:4d}  greedyUB={}  (searching...)", sz, ub);
+            std::fflush(stdout);
             auto bt0 = Clock::now();
             int mt = fresh.min_total(buckets[p], max_depth - 1);
             double s = std::chrono::duration<double>(Clock::now() - bt0).count();
-            std::println("  size={:4d}  min_total={:5d}  ({:7.2f}s)  memo={}",
-                sz, mt, s, fresh.tot_memo_size());
+            const auto& st = fresh.stats();
+            std::println("  size={:4d}  greedyUB={:5d}  min_total={:5d}  ({:7.2f}s)  "
+                "nodes={} memo_hits={} memo={}",
+                sz, ub, mt, s, st.mintotal_calls, st.mintotal_hits, fresh.tot_memo_size());
             std::fflush(stdout);
         }
         return 0;
