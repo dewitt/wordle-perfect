@@ -140,7 +140,8 @@ BuildResult build_tree(const WordList& wl, const PatternMatrix& pm,
                        Database& db, const std::vector<WordIndex>& cand,
                        int worst_cap, std::size_t sweep_lookahead,
                        std::size_t emit_lookahead, std::size_t top,
-                       WordIndex forced_root, unsigned nthreads, bool use_gpu) {
+                       WordIndex forced_root, unsigned nthreads, bool use_gpu,
+                       bool exact_mean) {
     const int n = static_cast<int>(cand.size());
     BuildResult result;
 
@@ -170,6 +171,9 @@ BuildResult build_tree(const WordList& wl, const PatternMatrix& pm,
 #endif
 
     WordIndex opener = forced_root;
+    if (exact_mean && opener == WordList::NPOS)
+        die("--exact-mean currently requires a forced --start-word "
+            "(unforced exact opener search is not yet tractable for all words)");
     if (opener == WordList::NPOS) {
         // Rank candidate openers by entropy (best mean first); optionally cap.
         std::vector<std::pair<double, WordIndex>> openers;
@@ -242,6 +246,27 @@ BuildResult build_tree(const WordList& wl, const PatternMatrix& pm,
     // ── Emit the chosen opener's tree (emit_lookahead applied here only) ──────
     EntropySolver solver{wl, pm};
     solver.set_gpu_scorer(gpu_ptr);
+
+    // Exact-mean mode: solve the provably minimal-mean tree once at the root.
+    // min_total memoises the optimal first guess for EVERY subset on the optimal
+    // tree, so the recursive emit below just reads optimal_guess() per node.
+    if (exact_mean) {
+        std::println("  solving exact minimal-mean tree (worst<={})...", worst_cap);
+        const auto mt0 = Clock::now();
+        // Fix the opener, then min_total each non-solved bucket so optimal_guess
+        // is populated for every node reachable under this opener.
+        auto root_buckets = EntropySolver::partition(cand, opener, pm);
+        for (Pattern p = 0; p < PATTERN_COUNT; ++p) {
+            if (p == PATTERN_SOLVED || root_buckets[p].size() <= 1) continue;
+            int sub = solver.min_total(root_buckets[p], worst_cap - 1);
+            if (sub >= EntropySolver::MIN_TOTAL_INFEASIBLE)
+                die(std::format("exact-mean: bucket (pattern {}) infeasible at worst<={}",
+                                p, worst_cap));
+        }
+        std::println("  exact-mean DP done ({:.1f}s, {} memo entries)",
+            elapsed_s(mt0), solver.tot_memo_size());
+    }
+
     if (auto r = db.begin_transaction(); !r) die(r.error());
     Progress prog{"  building tree", std::uint64_t{0}, "nodes"};
     const auto emit_t0 = Clock::now();
@@ -251,9 +276,18 @@ BuildResult build_tree(const WordList& wl, const PatternMatrix& pm,
     std::function<NodeId(const std::vector<WordIndex>&, int, WordIndex)> emit =
         [&](const std::vector<WordIndex>& set, int budget, WordIndex forced) -> NodeId {
         NodeId id = next_id++;
-        WordIndex guess = (forced != WordList::NPOS) ? forced
-            : (set.size() == 1 ? set[0]
-               : solver.best_guess_feasible(set, budget, emit_lookahead));
+        WordIndex guess;
+        if (forced != WordList::NPOS)        guess = forced;
+        else if (set.size() == 1)            guess = set[0];
+        else if (exact_mean) {
+            // The exact minimal-mean first guess for this subset (populated by
+            // min_total above). Falls back to the feasible policy only if the
+            // subset wasn't on the solved tree (should not happen).
+            guess = solver.optimal_guess(set, budget);
+            if (guess == WordList::NPOS)
+                guess = solver.best_guess_feasible(set, budget, emit_lookahead);
+        }
+        else guess = solver.best_guess_feasible(set, budget, emit_lookahead);
         if (guess == WordList::NPOS)
             die(std::format("no feasible guess (set {}, budget {})",
                             set.size(), budget));
@@ -347,9 +381,10 @@ int main(int argc, char** argv) {
     };
 
     // ── Modifiers / flags ────────────────────────────────────────────────────
-    const bool full_mode = has_flag("--full");
-    const bool no_binary = has_flag("--no-binary");
-    const bool use_gpu   = has_flag("--gpu");   // Metal-batched bucket ranking
+    const bool full_mode  = has_flag("--full");
+    const bool no_binary  = has_flag("--no-binary");
+    const bool use_gpu    = has_flag("--gpu");   // Metal-batched bucket ranking
+    const bool exact_mean = has_flag("--exact-mean");  // provably minimal-mean tree
 
     std::string start_word;
     std::string words_date_override;
@@ -457,13 +492,14 @@ int main(int argc, char** argv) {
         target_depth, emit_lookahead, nthreads);
     auto res = build_tree(*wl, pm, *db, answer_indices, target_depth,
                           sweep_lookahead, emit_lookahead, top,
-                          fixed_root, nthreads, use_gpu);
+                          fixed_root, nthreads, use_gpu, exact_mean);
     const std::uint64_t nodes_written = res.nodes;
     const double build_s = elapsed_s(t0);
     // Label records *what was done*, not a quality claim: "minimax" = worst-case
     // minimised (provably optimal at 5); the mean is heuristic, not claimed optimal.
-    const std::string strategy_label =
-        std::format("minimax-worst{}-lookahead{}", target_depth, emit_lookahead);
+    const std::string strategy_label = exact_mean
+        ? std::format("exact-mean-worst{}", target_depth)
+        : std::format("minimax-worst{}-lookahead{}", target_depth, emit_lookahead);
     std::println("tree built in {:.1f}s  ({} nodes)", build_s, nodes_written);
 
     // ── Evaluate (independent verification → stored metadata) ─────────────────
