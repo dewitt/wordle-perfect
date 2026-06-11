@@ -198,6 +198,36 @@ std::uint64_t feas_hash(std::span<const WordIndex> s, int depth) {
     return mb;
 }
 
+// Admissible lower bound on min_total for a single guess, computed in one
+// histogram pass (no candidate-list materialisation). A non-solved bucket of
+// size k costs >= 2k-1 below this guess; a singleton costs 1; everyone pays 1
+// for the guess itself (the +n). The SOLVED bucket (the guess == answer) is a
+// direct hit costing 1, already in the +n. Returns {lb, max_bucket}.
+struct GuessLB { int lb; int max_bucket; };
+[[gnu::hot]] GuessLB guess_lower_bound(const PatternMatrix& pm,
+                                       std::span<const WordIndex> candidates,
+                                       WordIndex gi) noexcept {
+    thread_local std::array<uint16_t, PATTERN_COUNT> hist{};
+    Pattern seen[PATTERN_COUNT];
+    int nseen = 0, mb = 0;
+    const int n = static_cast<int>(candidates.size());
+    for (WordIndex ai : candidates) {
+        const Pattern p = pm.get(gi, ai);
+        const int c = ++hist[p];
+        if (c == 1) seen[nseen++] = p;
+        if (c > mb) mb = c;
+    }
+    int lb = n;  // everyone pays for this guess
+    for (int i = 0; i < nseen; ++i) {
+        const Pattern p = seen[i];
+        const int c = hist[p];
+        if (p != PATTERN_SOLVED && c >= 2) lb += 2 * c - 1;  // bucket floor 2k-1
+        // singletons and the SOLVED hit cost their already-counted 1 (in n)
+        hist[p] = 0;  // sparse reset
+    }
+    return {lb, mb};
+}
+
 // Single-pass partition score: returns max-bucket and (unweighted) Shannon
 // entropy in one histogram pass, so best_guess_feasible doesn't compute the
 // histogram twice (once for the no-progress filter, once for entropy).
@@ -477,17 +507,21 @@ int EntropySolver::min_total(std::span<const WordIndex> candidates, int depth,
     // (>=1 word needs a 2nd guess). If even that can't beat `bound`, give up.
     if (n + (n - 1) >= bound) return MIN_TOTAL_INFEASIBLE;
 
-    // Order guesses by max-bucket ascending: good splitters first tighten the
-    // incumbent fastest (more αβ pruning) and tend to be the optimal choice.
-    std::vector<std::pair<int, WordIndex>> order;
+    // Order guesses by their admissible LOWER BOUND ascending. The LB directly
+    // bounds the objective (2|b|-1 per non-solved bucket), so the lowest-LB
+    // guesses are the most promising — trying them first finds a tight incumbent
+    // fast, which makes αβ prune the long tail. (max-bucket is only a proxy.)
+    // We also stash each guess's LB so the main loop can skip it without
+    // partitioning once the incumbent has dropped below its floor.
+    std::vector<std::pair<int, WordIndex>> order;  // (lb, gi)
     {
         const std::size_t W = words_.size();
         order.reserve(W);
         for (std::size_t g = 0; g < W; ++g) {
             const auto gi = static_cast<WordIndex>(g);
-            const int mb = max_bucket_size(patterns_, candidates, gi);
+            const auto [lb, mb] = guess_lower_bound(patterns_, candidates, gi);
             if (mb == n) continue;             // no progress
-            order.emplace_back(mb, gi);
+            order.emplace_back(lb, gi);
         }
         std::ranges::sort(order, [](auto& a, auto& b){
             if (a.first != b.first) return a.first < b.first;
@@ -511,16 +545,18 @@ int EntropySolver::min_total(std::span<const WordIndex> candidates, int depth,
             if (ub < best) { best = ub; best_gi = gg; }
         }
     }
-    for (auto& [mb, gi] : order) {
+    for (auto& [glb, gi] : order) {
+        // `order` is sorted by admissible LB ascending. Once a guess's LB can't
+        // beat the incumbent, NO later guess can either — terminate the whole
+        // loop, not just this guess. This is the key large-bucket accelerator:
+        // after the first good guess tightens `best`, the long tail is skipped
+        // wholesale without a single partition.
+        if (glb >= best) break;
+
         auto buckets = partition(candidates, gi, patterns_);
 
-        // Collect this guess's non-solved buckets and compute an admissible
-        // lower bound on its total BEFORE any recursion. A bucket of size k
-        // costs >= 2k-1 at the next level (one word resolved in 1 guess, the
-        // other k-1 in >=2); a singleton costs 1. So:
-        //   LB(gi) = n + Σ_singletons 1 + Σ_{|b|>=2} (2|b|-1).
-        // If LB(gi) >= best, this guess can never beat the incumbent — skip it
-        // entirely (no partition recursion). (Selby's 2|H|-1 lower bound.)
+        // Recompute the exact per-guess lower bound from the materialised
+        // partition (same value as glb; cheap, and gives us the bucket list).
         struct Sub { Pattern p; int sz; };
         std::vector<Sub> subs;
         subs.reserve(64);
