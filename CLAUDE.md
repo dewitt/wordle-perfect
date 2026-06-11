@@ -37,7 +37,7 @@ A Wordle solver that precomputes the best-known decision tree over all valid Wor
 
 **Database results (default `build_db`, start word: reast):**
 - Worst case: **5 guesses** — the proven optimum for the curated answer set (4 is impossible). All 2,355 answers solved, 0 failures.
-- Mean depth: **3.4870 guesses** (lookahead 1, parallel opener sweep picks reast). This mean is a heuristic result, NOT claimed optimal (≈3.42 is the true minimum, issue #26).
+- Mean depth: **3.4870 guesses** (lookahead 1, parallel opener sweep picks reast). This mean is a heuristic result, NOT claimed optimal. The **exact** optimum for the reast opener on our list is **3.4671** (issue #26, branch `exact-mean-bnb`; see below).
 - Distribution: 41×2, 1176×3, 1072×4, 66×5 (zero 6+)
 - Built by `build_db --output wordle.db` (parallel sweep of top-50 openers @ sweep-lookahead 1) in ~1 min on 8 cores; `--lookahead K` refines the winner's tree (e.g. K=30 → 3.4679, ~80s); `--start-word W` skips the sweep; `--top 0` sweeps all openers
 - worst/mean are measured by the built-in `evaluate()` (SQLite==binary parity)
@@ -64,9 +64,34 @@ is `minimax-worst{D}-lookahead{K}` — describing what was done, not a quality c
 ## Known limitations
 
 - **`EvalResult::dist` is capped at depth 15** in `build_db.cpp`. Words solved at depth ≥ 16 would appear as failures. The current worst case is 7, so this is not a practical concern. (The CLI `eval` mode uses the shared `walk_target` with `WALK_DEPTH_CAP = 16` and reports true depths rather than capping at the DB's worst-case metric — issue #9, fixed.)
-- **Mean depth (3.4870 default, 3.4679 with `--lookahead 30`) is above the ~3.42 theoretical optimum.** The worst-case-5 result is optimal, but the feasibility-constrained entropy-greedy + bounded-lookahead policy doesn't fully minimise the mean (exact mean-optimal DP over the full vocabulary is much more expensive). Wider `--lookahead` closes the gap at higher build cost. Closing to ~3.42 is remaining work on issue #26.
+- **Production DB mean (3.4870 default, 3.4679 with `--lookahead 30`) is above the exact optimum.** The worst-case-5 result is optimal, but the production builder's feasibility-constrained entropy-greedy + bounded-lookahead policy doesn't fully minimise the mean. **The exact minimal mean is now computable** — see below.
 
-See the open GitHub issues for the remaining backlog from the code review — notably the SIMD/bitmask pattern path (#12, open) and pushing the mean toward ~3.42 (#26, open). The worst-case-5 tree (#8) and the flat mmap'd binary DB (#13) are implemented.
+### Exact minimal-mean optimiser (issue #26, branch `exact-mean-bnb`)
+
+`EntropySolver::min_total(S, depth, bound)` computes the **provably minimal**
+total/mean solve depth subject to the worst-case-5 cap, via branch-and-bound +
+transposition table, validated against a brute-force oracle (`min_total` tests,
+depths 3/4/5). It is now tractable on the full answer set with a forced opener
+(~60 s single-core on an M2) after three Selby-style optimisations:
+(1) `2|b|-1` per-guess lower bound + |H_i|-ordered partition loop;
+(2) LB-ordered guess iteration with whole-loop early break;
+(3) **lower-bound caching** — the memo stores a proven `lower` per subset and
+child floors use `max(2k-1, cached_lower)` with a tight per-child bound (this
+also fixed a latent soundness bug that under-counted large buckets).
+
+**Exact optimal means on our 2355-answer list (worst≤5), by opener:** reast
+**3.4671** (best), tarse 3.4739, salet 3.4743, trace 3.4764, slate 3.4773,
+crate 3.4807, carse 3.5057, raise 3.5227. So **reast is the best opener among
+strong candidates on our list**, and its exact optimum (3.4671) is only 0.0199
+below the production greedy (3.4870). This differs from Selby's TARSE 3.4140
+because our answer set has 40 more words (2355 vs his 2315), shifting both the
+optimal opener and the achievable mean. Driver: `tools/exact_mean.cpp`
+(`--start WORD --probe-buckets`). Full results + method in `BENCHMARKS.md`.
+**Remaining:** wire `min_total` into `build_db` to emit an exact-mean tree (the
+probe only measures the mean; it doesn't yet emit a DB), and a full unforced
+opener search to prove the global optimum.
+
+See the open GitHub issues for the remaining backlog from the code review — notably the SIMD/bitmask pattern path (#12, open) and emitting an exact-mean DB (#26, in progress on `exact-mean-bnb`). The worst-case-5 tree (#8) and the flat mmap'd binary DB (#13) are implemented.
 
 ## Spec format
 

@@ -106,6 +106,53 @@ sweep; reaching ~6 s requires either accepting a different-but-optimal tree
 deliberately not taken. Coarser whole-level batching could still trim the
 GPU-side `score_sets`/unpack overhead.
 
+## Exact minimal-mean optimisation (issue #26)
+
+`EntropySolver::min_total` computes the **provably minimal** total/mean solve
+depth subject to the worst-case-5 cap, via branch-and-bound with a transposition
+table. After three rounds of Selby-style optimisation it is tractable on the
+full answer set with a forced opener (~60 s single-core on an M2):
+
+1. **`2|b|-1` per-guess lower bound + |H_i|-ordered partition loop** — skip a
+   guess without recursion when its admissible floor can't beat the incumbent;
+   process buckets small-first so αβ fires before the expensive large buckets.
+2. **LB-ordered guess iteration + whole-loop early break** — try lowest-floor
+   guesses first; once a guess's floor can't beat the incumbent, every later
+   guess is skipped wholesale. (size-109 reast bucket: 3.19 s → 0.48 s.)
+3. **Lower-bound caching** — the memo stores a proven `lower` per subset (always,
+   even when αβ-pruned); child-bucket floors use `max(2k-1, cached_lower)` and
+   each child gets a tight `child_bound`. This made the 4 largest reast buckets
+   (124/129/149/234) tractable (234 → 10.4 s) **and fixed a latent soundness bug**
+   where αβ-pruned child results were cached as exact (under-counting; e.g. the
+   size-109 reast bucket reported 288 vs the true 298). Validated against an
+   exhaustive brute-force oracle (`min_total` tests, depths 3/4/5).
+
+### Exact optimal mean by opener (our 2355-answer / 14855-guess list, worst≤5)
+
+| Opener | Exact optimal mean | Total |
+|--------|--------------------|-------|
+| **reast** | **3.4671** | 8165 |
+| tarse  | 3.4739 | 8181 |
+| salet  | 3.4743 | 8182 |
+| trace  | 3.4764 | 8187 |
+| slate  | 3.4773 | 8189 |
+| crate  | 3.4807 | 8197 |
+| carse  | 3.5057 | 8256 |
+| raise  | 3.5227 | 8296 |
+
+Findings:
+- **reast is the best opener among strong candidates on our list**, at an exact
+  optimal mean of **3.4671** — only 0.0199 below the greedy builder's 3.4870, so
+  the production tree is already very close to opener-optimal for reast.
+- This **differs from Selby's published result** (TARSE 3.4140 wins on the
+  14855-guess list) because our answer set has **2355** words — the 40
+  post-acquisition NYT additions over Selby's 2315 shift both the optimal opener
+  and the achievable mean upward. On our set tarse (3.4739) is mid-pack.
+- These means are computed per *forced* opener. A full unforced opener search
+  (`min_total(full_set, 5)`) would prove the global optimum but is much more
+  expensive; the forced-opener probe over strong candidates is the practical
+  route and reast already dominates them.
+
 ### Raw WPMETRICS datapoints
 
 ```
